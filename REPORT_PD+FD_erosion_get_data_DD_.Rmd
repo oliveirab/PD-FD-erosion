@@ -1,0 +1,456 @@
+---
+title: "Erosion of phylogenetic and functional diversity in Amphibians"
+author: "Brunno F Oliveira^1^; Gabriel C Costa^1^"
+date: "October 20, 2015\n**1** Programa de Pós-graduação em Ecologia, Universidade
+  Federal do Rio Grande do Norte, Lagoa Nova, 59072-970, Natal, RN, Brazil. **Corresponding
+  author:** (brunno.oliveira@me.com) "
+output: html_document
+theme: united
+toc: yes
+---
+
+*** 
+
+\newpage
+
+
+Packages versions:
+```{r info,message=FALSE,echo=F}
+info <- sessionInfo()
+```
+
+We used `r info[1]$R$ver` and the following packages:
+```{r packages,message=FALSE,echo=T}
+library(sp);library(rgdal);library(raster);library(letsR);library(maptools);library(maps);library(maptools);library(rgeos);library(raster);library(stringr);library(picante);library(ape);library(rgdal);library(ggplot2);library(geiger);library(ade4);library(foreach);library(parallel);library(doParallel);library(PBSmapping);library(nabor);library(plot3D);library(knitr);library(vegan);library(phytools);library(rworldmap);library(FD)
+```
+
+```{r echo=F}
+rm(list=ls())
+gc()
+```
+
+Get presence/absence grid for 2dg cells  
+Skip this step if you have already done the presence/absence grid
+```{r echo=F}
+#setwd("/media/brunno/FAT/Chap3/R_code_DD")
+setwd("F:/Chap3/R_code_DD")
+
+mapas <- readOGR(dsn= "AMPHIBIANS/AMPHIBIANS.shp",layer="AMPHIBIANS")
+
+occr <- lets.presab(mapas, resol = 2)
+
+plot(occr$Richness_Raster)
+
+save.image("Get shp richness maps.RData")
+```
+
+Load the presence/absence grid
+```{r echo=F}
+#setwd("/media/brunno/FAT/Chap3/R_code_DD")
+setwd("F:/Chap3/R_code_DD")
+
+source("FindIUCN.R")
+
+load("Get shp richness maps.RData")
+```
+
+```{r eval=F,echo=F} 
+mundi <- importShapefile("F:/GIS/Shp files/ne_10m_coastline.shp")
+mundi <- clipLines(mundi, xlim = c(-180 , 180) , ylim = c(-60 , 83.62) )
+mundi <- PolySet2SpatialLines( mundi )
+
+land <- readShapePoly("F:/GIS/Shp files/ne_50m_land/ne_50m_land_no_artic.shp")
+```
+
+1. Species occurrences
+-------------------------------
+```{r echo=F}
+# Load species occurrences (6312 spp)
+# Species occurrences represents global distribution data in 1dg resolution
+
+dataset <- occr
+
+occr <- dataset$Presence_and_Absence_Matrix
+
+spp <- dataset$Species_name
+spp <- data.frame(gsub(" ","_",spp))
+
+# Original N spp
+origSppN <- length(dataset$Species_name)
+
+# Get IUCN status
+IUCN <- read.csv("IUCN_DD_predicted.csv")[,2:3]
+IUCN <- as.data.frame(as.matrix(IUCN),stringsAsFactors=F)
+
+# Remove Extinct and Extinc in the wild species
+rem <- which(IUCN$IUCN=="EX"|IUCN$IUCN=="EW")
+IUCN <- IUCN[-rem,]
+
+# new spp data
+spp <- data.frame(IUCN$Species)
+
+all.equal(sort(as.character(spp[,1])), sort(IUCN$Species))
+```
+
+The original species occurrence dataset comprises `r nrow(spp)` species
+
+2. Trait data
+-------------------------------
+```{r echo=F}
+trait <- data.frame(read.csv("AmphiBIO_v1_Aug2015_imputed.csv", header=TRUE))
+traitdata <- as.vector(trait$Species)
+
+# Original N spp
+origTraitN <- nrow(trait)
+
+for(i in 1:length(traitdata)){ # Fix names
+  #cat("\r",i,"of", length(traitdata))
+  if(str_sub(traitdata[i], start= -1) == "_"){ # check is species names ends with '_'
+    traitdata[i] <- gsub('.{1}$', '', traitdata[i]) # remove '_' when species names ends with
+  }
+    if(str_sub(traitdata[i], start= -2) == ".1"){ # check is species names ends with '.1'
+    traitdata[i] <- gsub('.1', '', traitdata[i]) # remove '.1' when species names ends with
+  }
+  else{
+    traitdata[i] <- traitdata[i]
+  }
+}
+
+traitdata <- data.frame(traitdata)
+
+traitdata <- gsub(" ","_",traitdata[,1])
+
+trait$Species <- traitdata
+
+rem <- which(duplicated(traitdata)) # remove duplicated species
+traitdata <- data.frame(traitdata[-rem])
+trait <- trait[-rem,]
+
+rownames(trait) <- traitdata[,1]
+
+# fix trait place
+fos <- ter <- aqua <- arb <- NA
+
+for(i in 1:nrow(trait)){
+  #cat("\r",i,"of", nrow(trait))
+  tmp <- strsplit(as.character(trait$Place[i]), "")[[1]]
+  ifelse("1" %in% tmp, fos[i] <- 1, fos[i] <- 0)
+  ifelse("2" %in% tmp, ter[i] <- 1, ter[i] <- 0)
+  ifelse("3" %in% tmp, aqua[i] <- 1, aqua[i] <- 0)
+  ifelse("4" %in% tmp, arb[i] <- 1, arb[i] <- 0)
+}
+
+# fix trait breeding strategy
+dir <- lar <- viv <- NA
+
+for(i in 1:nrow(trait)){
+  #cat("\r",i,"of", nrow(trait))
+  tmp <- as.character(trait$Breeding_strategy_type[i])
+  ifelse(tmp=="LAR", lar[i] <- 1, lar[i] <- 0)
+  ifelse(tmp=="DIR", dir[i] <- 1, dir[i] <- 0)
+  ifelse(tmp=="VIV", viv[i] <- 1, viv[i] <- 0)
+}
+
+trait <- cbind(trait,fos,ter,aqua,arb,dir,lar,viv)
+trait <- trait[,c(-1:-4,-6,-9)]
+
+# Match species names with IUCN
+# It takes a loooong of time to run depending on the internet connection.
+# !!! Dont run if you have already ran it before!!!
+#for(i in 1:nrow(trait)){ cat("\r", i, "from", nrow(trait))
+#  resloop <- b.LoopIUCN(gsub('_',' ',trait$Species[i]))
+#  trait$Species[i] <- resloop$IUCNname
+#  trait$IUCN[i] <- resloop$Status
+#}
+# save it!
+#write.csv(data.frame(Species=trait$Species,IUCN=trait$IUCN),'trait_names_updated.csv')
+
+# Open if you have ran it before...
+spnamesnew <- read.csv('trait_names_updated.csv')
+trait$Species <- spnamesnew$Species
+
+# put underline between genus and species names
+trait$Species <- gsub(" ","_",trait$Species)
+
+trait <- trait[-which(is.na(trait$Species)),] # remove species not found in IUCN catalog (maybe newly describid species or synonims)
+rem <- which(duplicated(trait$Species)) # remove duplicated species
+trait <- trait[-rem,]
+rownames(trait) <- trait$Species
+
+traitdata <- data.frame(trait$Species) # new traitdata after fixing species names
+
+trait <- trait[,-1] # we dont need the columm Species anymore
+
+```
+
+The original trait dataset comprises `r nrow(traitdata)` species.
+   
+3. Load phylogeny
+-------------------------------
+_Here we use an updated version of Pyron & Wiens' (2012) phylogeny._  
+_This phylogeny is not published yet, but Pyron's colaborators agreed in sharing this phylogeny with us. We must wait until this phylogeny gets publicated to publish your paper._
+```{r echo = F}
+tree <- read.tree('Pyron_tree_new.txt')
+tree
+
+origTreeN <- length(tree$tip.label)
+
+# fix names in tree
+#tipnames<-NA
+#for(i in 1:length(tree$tip.label)){ cat("\r", i, "from", length(tree$tip.label))
+#  sptogo <- tree$tip.label[i]
+#  resloop <- b.LoopIUCN(gsub('_',' ',sptogo))
+#  tipnames[i] <- gsub(' ','_',resloop$IUCNname)
+#}
+# save it!
+#write.csv(data.frame(Species=tipnames),'tree_names_fixed.csv')
+
+tipnames <- read.csv('tree_names_fixed.csv')
+tipnames <- as.data.frame(as.matrix(tipnames),stringsAsFactors=F)
+tipnames <- tipnames$Species
+
+# after fixing species names some species appear as duplicated and their names are coerced to end with '.1'.
+# get rid of duplicates
+for(i in 1:length(tipnames)){ # Fix names
+  if(!is.na(tipnames[i])){
+    if(str_sub(tipnames[i], start= -1) == "_"){ # check is species names ends with '_'
+      tipnames[i] <- gsub('.{1}$', '', tipnames[i]) # remove '_' when species names ends with
+      }
+    if(str_sub(tipnames[i], start= -2) == ".1"){ # check is species names ends with '.1'
+      tipnames[i] <- gsub('.1', '', tipnames[i]) # remove '.1' when species names ends with
+    }
+  }
+  else{
+    tipnames[i] <- tipnames[i]
+  }
+}
+
+# renames tips
+tree$tip.label <- tipnames
+
+# remove duplicated species
+rem <- which(duplicated(tree$tip.label)) 
+tipnames <- data.frame(tipnames[-rem])
+tree <- drop.tip(tree, rem)
+
+length(which(is.na(tipnames))) # A lot of non-found species. They have not been captured here because I got hid of them when I removed NAs.
+
+#tree$tip.label[which(is.na(tipnames$Species))] # These species
+
+# remove NA species (probably newly-described non-acessed species)
+notfound <- which(is.na(tipnames))
+tree <- drop.tip(tree, notfound)
+tipnames <- data.frame(tree$tip.label)
+```
+
+This phylogenetic comprises `r nrow(treedata)` species 
+
+5. Create a list of species belonguing to the three datasets
+```{r echo = F}
+names(spp) <- names(tipnames) <- names(traitdata) <- "sps"
+
+lista1 <- data.frame(merge(spp, tipnames, by='sps'))
+
+lista2 <- merge(lista1, traitdata, by='sps') # This is the list of species belonging to all three datasets
+lista <- na.omit(as.vector(lista2[,1]))
+
+rm(lista1,lista2)
+```
+
+
+```{r echo = F}
+## Subset occurrences, traits and phylogenies to the species belonging among all datasets
+
+## For distribution data
+XY<-occr[,1:2] # get coordinates
+XY <- as.data.frame(XY)
+names(XY) <-c("x","y")
+
+occr <- as.data.frame(occr[,-1:-2]) # get sps occurrences
+
+names(occr) <- dataset$Species_name
+names(occr) <- gsub(" ","_",names(occr)) 
+
+occr <- subset(occr, select=lista) # Subset the species in lista
+Rich <- rowSums(occr) # Get richness for every cell
+
+# Does at least one community has zero species?
+any(Rich==0) 
+# Does at least one species occur in any community?
+any(apply(occr, 2, sum)==0)
+
+# Remove communities with less than 3 species
+occr <- occr[Rich>1,]
+# Does at least one community has zero species?
+any(apply(occr, 1, sum)==0) 
+# Does at least one species occur in any community?
+any(apply(occr, 2, sum)==0)
+
+# Remove species which occur in any community
+nosp <- which(apply(occr, 2, sum)==0)
+lista <- lista[-nosp] # new lista
+
+# New occr
+occr <- subset(occr, select=lista) # Subset the species in lista
+# Does at least one community has zero species?
+any(apply(occr, 1, sum)==0) 
+# Does at least one species occur in any community?
+any(apply(occr, 2, sum)==0)
+
+Rich <- rowSums(occr) # Get richness for every cell
+
+XY <- XY[rownames(occr),]
+
+## For IUCN
+IUCN <- newIUCN
+rownames(IUCN) <- IUCN$Species
+IUCN <- IUCN[lista,]
+
+## For trait data
+trait <- trait[lista,] 
+
+## For phylogeny
+
+phylo_nqro <- drop.tip(tree, lista) #Remove as espécies que quero e ficam as que não quero
+tip_nqro<-as.vector(phylo_nqro$tip.label) #Lista das sps que nao quero
+tree<-drop.tip(tree, tip_nqro) #Eliminar as sp que nao quero e ficam as que quero
+
+# Rearrange data
+# The species data in the data frames containing the distribution and trait measurements
+# must be in the same row order as the names of the species in the tree object (mytree$tip.label). 
+occr <- occr[,match(tree$tip.label,names(occr))]
+trait <- trait[match(tree$tip.label,rownames(trait)),]
+IUCN <- IUCN[match(tree$tip.label,rownames(IUCN)),]
+# check whether our community, tree and traits are in the same order.
+all.equal(names(occr), tree$tip.label)
+all.equal(names(occr), rownames(trait))
+all.equal(names(occr), rownames(IUCN))
+```
+
+Species richness map
+```{r}
+SR <- cbind(data.frame(XY),Var=rowSums(occr))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='',axes=F,box=F, col=colorRampPalette(c('blue','yellow','red'))(40))
+plot(mundi, axes = F, add=T)
+```
+
+We set the minimum number of species present in a community (2x2 degree cells) to `r min(rowSums(occr))`.
+
+Note there are many places with few species
+```{r echo = F}
+hist(rowSums(occr))
+```
+
+There are `r dim(occr)[2]` species in common between these three datasets (~`r dim(occr)[2]/origSppN`% of all described amphibian species). We use this species' list to subset the original species, trait and phylogenetic datasets for use in downstream analyses.
+
+This dataset corresponds to `r dim(occr)[2]/origSppN`%, `r dim(occr)[2]/origTraitN`%, `r dim(occr)[2]/origTreeN`% of the original distribution, trait and phylogenetic dataset (mean = `r mean(c(dim(occr)[2]/origSppN, dim(occr)[2]/origTraitN, dim(occr)[2]/origTreeN))`, sd = `r sd(c(dim(occr)[2]/origSppN, dim(occr)[2]/origTraitN, dim(occr)[2]/origTreeN))`)
+   
+Create datasets with three scenarios:  
+_1) Control scenario: No species went extinct_  
+_2) Scenario 1: All threatened species went extinct_  
+_3) Scenario 2: All threatened and lower risk species went extinct_  
+
+_IUCN risk categories:_  
+__Lower risk__  
+NT = near threatened  
+VU = vulnerable  
+
+__High risk (Threatened)__  
+EN = endangered  
+CR = critically endangered  
+
+__Extinct__  
+EW = extinct in the wild  
+EX = extinct   
+
+__Other category__  
+DD = data deficient  
+LC = least concern  
+
+```{r eval = F, echo = F}
+table(IUCN$IUCN)
+
+# Add a new column to highlight lower risk and threatened (high risk) species
+IUCN2 <- gsub("NT","LRisk",IUCN$IUCN)
+IUCN2 <- gsub("VU","LRisk",IUCN2)
+IUCN2 <- gsub("EN","HRisk",IUCN2)
+IUCN2 <- gsub("CR","HRisk",IUCN2)
+
+IUCN3 <- IUCN2
+IUCN3 <- gsub("LRisk","S2",IUCN3)
+IUCN3 <- gsub("HRisk","S2",IUCN3)
+  
+# list of low risk species
+listaLR <- lista[which(IUCN2=="LRisk")]
+# check
+length(listaLR)==length(which(IUCN2=="LRisk"))
+
+# list of high risk species
+listaHR <- lista[which(IUCN2=="HRisk")]
+# check
+length(listaHR)==length(IUCN2[which(IUCN2=="HRisk")])
+
+# list of species for scenario 1 (loosing HR)
+listaS1 <- lista[which(!IUCN2=="HRisk")]
+# check
+length(listaS1)==length(IUCN2[which(!IUCN2=="HRisk")])
+
+# list of species for scenario 2 (loosing LR + HR)
+listaS2 <- lista[which(!IUCN3=="S2")]
+# check
+length(listaS2)==length(IUCN3[which(!IUCN3=="S2")])
+```
+
+
+There are `r length(listaLR)` species at the lower risk category and `r length(listaHR)` species at the high risk category, which corresponds to `r round(length(listaLR)/length(lista),2)*100`% and `r round(length(listaHR)/length(lista),2)*100`% of all amphibians, respectively.   
+In scenario 1 there will be loss `r length(lista)-length(listaS1)` species and `r length(lista)-length(listaS2)` species in scenario 2, which corresponds to `r round((length(lista)-length(listaS1))/length(lista),2)*100`% and `r round((length(lista)-length(listaS2))/length(lista),2)*100`% of all amphibian species, respectively.
+
+
+```{r eval = F, echo = F, warning = F}
+## subset dataset for each scenario
+
+# occr
+occrS1 <- occr[listaS1] # occr scenario 1
+occrS2 <- occr[listaS2] # occr scenario 2
+```
+
+
+```{r eval = F, echo = F, warning = F}
+# traits
+trait$Body_size <- log(trait$Body_size+1)
+trait$No_offspring_per_yr <- log(trait$No_offspring_per_yr+1)
+  
+traitdis <- gowdis(data.frame(trait))
+traitpco <- ade4::dudi.pco(traitdis, scannf = F, nf = 5)
+cumsum(traitpco$eig / sum(traitpco$eig))[1:3] 
+
+traits <- data.frame(Axis1=traitpco$li[,1], Axis2=traitpco$li[,2], Axis3=traitpco$li[,3])
+rownames(traits) <- lista
+
+write.csv(traits, 'traits2.csv')
+
+traitS1 <- traits[listaS1,] # trait scenario 1
+traitS2 <- traits[listaS2,] # trait scenario 2
+
+```
+
+
+
+```{r eval = F, echo = F, warning = F}
+# phylogeny scenario 1
+phylo_nqro <- drop.tip(tree,listaS1) #Remove as espécies que quero e ficam as que não quero
+tip_nqro <- as.vector(phylo_nqro$tip.label) #Lista das sps que nao quero
+treeS1 <- drop.tip(tree, tip_nqro) #Eliminar as sp que nao quero e ficam as que quero
+# phylogeny for scenario 2
+phylo_nqro <- drop.tip(tree,listaS2) #Remove as espécies que quero e ficam as que não quero
+tip_nqro <- as.vector(phylo_nqro$tip.label) #Lista das sps que nao quero
+treeS2 <- drop.tip(tree, tip_nqro) #Eliminar as sp que nao quero e ficam as que quero
+```
+
+```{r}
+save.image("PD+FD_erosion_getdata.RData")
+```
+

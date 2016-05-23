@@ -1,0 +1,87 @@
+---
+title: "Impute Extinction risk for DD amphibians species. Supplementary materia from: Erosion of phylogenetic and functional diversity in Amphibians"
+author: "Brunno F Oliveira^1^; Gabriel C Costa^1^"
+date: "October 20, 2015\n**1** Programa de Pós-graduação em Ecologia, Universidade
+Federal do Rio Grande do Norte, Lagoa Nova, 59072-970, Natal, RN, Brazil. **Corresponding
+author:** (brunno.oliveira@me.com) "
+output: html_document
+theme: united
+toc: yes
+---
+  
+  *** 
+  
+  \newpage
+
+
+Packages versions:
+```{r info,message=FALSE,echo=F}
+info <- sessionInfo()
+```
+
+We used `r info[1]$R$ver` and the following packages:
+```{r packages,message=FALSE,echo=T}
+library('VIM')
+```
+
+```{r echo=F}
+rm(list=ls())
+gc()
+```
+
+Load the presence/absence grid
+```{r echo=F}
+#setwd("/media/brunno/FAT/Chap3/R_code_DD")
+setwd("F:/Chap3/R_code_DD")
+
+source("FindIUCN.R")
+
+load("Get shp richness maps.RData")
+```
+
+```{r}
+# Get IUCN status and range sizes
+OriginalIUCNdata <- data.frame(Species = mapas@data$binomial, IUCN = mapas@data$code, Range = mapas@data$shape_Area)
+
+OriginalIUCNdata <- as.data.frame(as.matrix(OriginalIUCNdata),stringsAsFactors=F)
+
+Range <- aggregate(as.numeric(OriginalIUCNdata$Range), by=list(OriginalIUCNdata$Species), FUN='sum')
+names(Range) <- c("Species", "Range")
+
+# remove duplicated species
+rem <- which(duplicated(OriginalIUCNdata$Species))
+OriginalIUCNdata <- OriginalIUCNdata[-rem,]
+
+OriginalIUCNdata <- merge(OriginalIUCNdata[,1:2], Range, by="Species")
+
+# fix names
+OriginalIUCNdata$Species <- gsub(" ","_",OriginalIUCNdata$Species)
+
+```
+
+
+```{r}
+# Predict IUCN Extinction risk status for DD species
+IUCNpred <- OriginalIUCNdata
+DDcells <- which(OriginalIUCNdata$IUCN=="DD")
+IUCNpred$IUCN[DDcells] <- NA
+
+IUCNpred <- kNN(IUCNpred, k = 6)
+View(IUCNpred)
+
+# See stats from imputed
+table(IUCNpred$IUCN[DDcells])
+
+# See stats of original
+table(OriginalIUCNdata$IUCN)
+
+# merge predicted with original
+IUCN <- merge(OriginalIUCNdata,IUCNpred,by="Species")
+IUCN <- IUCN[,c(1,4)]
+names(IUCN) <- c("Species","IUCN")
+```
+
+```{r}
+write.csv(IUCN, "IUCN_DD_predicted.csv")
+```
+
