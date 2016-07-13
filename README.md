@@ -1,1 +1,1 @@
-Threat diversity and the erosion of PD and FD 
+This repository contains code for "Decoupled erosion of amphibians’ phylogenetic and functional diversity from extinction"
