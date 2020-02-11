@@ -1,0 +1,3158 @@
+---
+title: "Erosion of phylogenetic and functional diversity in Amphibians"
+author: "Brunno F Oliveira^1^; Gabriel C Costa^1^"
+date: "October 20, 2015\n**1** Programa de Pós-graduação em Ecologia, Universidade
+  Federal do Rio Grande do Norte, Lagoa Nova, 59072-970, Natal, RN, Brazil. **Corresponding
+  author:** (brunno.oliveira@me.com) "
+output: pdf_document
+theme: united
+toc: yes
+---
+
+*** 
+
+\newpage
+
+
+Packages versions:
+```{r info, message=FALSE, echo=F}
+info <- sessionInfo()
+```
+
+# Load packages
+We used `r info[1]$R$ver` and the following packages:
+```{r packages, message=FALSE}
+rm(list=ls())
+gc()
+
+list.of.packages <- c("rmarkdown","sp","rgdal","raster","maps","maptools","rgeos","raster","stringr","picante","ape","rgdal","ggplot2","geiger","ade4","foreach","parallel","doParallel","PBSmapping","nabor","plot3D","knitr","vegan","phytools","rworldmap","FD","hypervolume","BAMMtools","spdep","fmsb","ncf","cowplot","classInt","colorplaner","MuMIn","plyr","dplyr","doSNOW","pbapply","ggpubr","reshape")
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+sapply(list.of.packages, require, character.only = TRUE)
+```
+
+#Load data
+```{r echo=F}
+setwd("C:/Users/boliveir/Dropbox (UFL)/Extinction PD-FD-loss/R_code_new")
+knitr::opts_knit$set(
+  root.dir = "C:/Users/boliveir/Dropbox (UFL)/Extinction PD-FD-loss/R_code_new")
+
+# load this if you running the code for the first time
+# load("PD+FD_erosion_get_data_DD_new.RData")
+# load("PD+FD_erosion_getdata.RData")
+
+olddata <- read.csv("dataset_old.csv")
+traits_old <- read.csv("traits2_old.csv")
+occr_old <- read.csv("occr_old.csv")
+
+# load this if you have already done the job
+load("PD+FD_erosion_new.RData")
+
+```
+
+
+# Land data
+```{r , echo=F}
+mundi <- rgdal::readOGR("G:/GIS/Shp files/ne_50m_land/ne_50m_land_no_artic.shp")
+crs(mundi) <-"+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 "
+mundi <- spTransform(mundi, CRS("+proj=cea +datum=WGS84"))
+
+# REFERENCE PROJECTION MAP
+mapa <- raster(xmn = -20592508, xmx = 20588492, ymn = -5743602, ymx = 6573398,
+              crs = CRS("+proj=cea +datum=WGS84"))
+res(mapa) <- 111000
+```
+
+# Load functions
+```{r eval = F}
+range01 <- function(x){(x-min(x,na.rm = T))/(max(x,na.rm = T)-min(x,na.rm = T))}
+
+#### function to get equal binds from a vector
+func_splint <- function(x,intervals=4) {
+  seq(min(x,na.rm = T),max(x,na.rm = T),length.out=intervals)
+}
+
+# Function for calculating PD from a list of species
+# sps = list of species
+# phy = phylogeny
+# minsp = mininum N species for calculationg PD
+PD_from_list <- function(sps, phy, minsp=3){
+  # build tree with species
+  if(length(sps) < minsp){  NA  }
+  else{
+    tips <- as.character(phy$tip.label)
+    trx <- drop.tip(phy, as.character(tips[-which(tips %in% sps)]))
+    # calculate PD
+    return(sum(trx$edge.length))
+  }
+}
+
+# calculates PD from a randon selection of n species from the given list of species
+# pool = species pool from which to sample
+# n = n species to sample
+# phy = phylogenetic tree used for calculating PD
+# random = optional. n times for replicate the random sample
+# internal function for PD_from_random
+PD_random <- function(pool, n, phy){
+  # random sample n species from the pool
+  sp.tmp <- pool[sample(1:length(pool), n, replace = F)]
+  # build tree with this random species
+  trx <- drop.tip(phy, as.character(phy$tip.label[-which(phy$tip.label %in% sp.tmp)]))
+  # calculate PD
+  return(sum(trx$edge.length))
+}
+PD_from_random <- function(pool, n, phy, runs=1){
+  if(runs<1){cat("ERROR: 'run' has to be higher than 1") ; stop()}
+  if(n < 3) { return(rep(NA, runs)) } # do not calculate PD for less than 3 species
+  else{
+    if (length(pool) == 0) { return(rep(NA, runs)) }
+    else{
+      replicate(runs, PD_random(pool, n, phy))
+    }
+  }
+}
+
+# Function for calculating FD from a list of species
+# sps = list of species
+# traitdata = trait data
+# minsp = mininum N species for calculationg FD
+# bd = bandwidth
+FD_from_list <- function(sps, traitdata, bd, minsp=3, get_volume = T, samples.per.point = 100){
+  # build tree with species
+  if(length(sps) < minsp){  NA  }
+  else{
+    td <- traitdata[which(rownames(traitdata) %in% sps),]
+    # calculate FD
+    FD_tmp <- hypervolume_gaussian(data=td, 
+                                   samples.per.point = samples.per.point,
+                                   kde.bandwidth = bd,
+                                   verbose = F)
+    if(get_volume == T){
+      return(get_volume(FD_tmp))
+    }
+    if(get_volume == F){
+      return(FD_tmp)
+    }
+  }
+}
+
+# calculates FD from a randon selection of n species from the given list of species
+# pool = species pool from which to sample
+# n = n species to sample
+# traitdata = trait data
+# bd = bandwidth
+# internal function for FD_from_random
+FD_random <- function(pool, n, traitdata, bd, get_volume = T, samples.per.point = 100){
+  # random sample n species from the pool
+  sp.tmp <- pool[sample(1:length(pool), n, replace = F)]
+  # build traitdata with this random species
+  traitdata_tmp <- traitdata[which(rownames(traitdata) %in% sp.tmp),]
+  # calculate FD
+  FD_tmp <- hypervolume_gaussian(data=traitdata_tmp, 
+                                 samples.per.point = samples.per.point,
+                                 kde.bandwidth = bd,
+                                 verbose = F)
+  
+  if(get_volume == T){
+      return(get_volume(FD_tmp))
+    }
+    if(get_volume == F){
+      return(FD_tmp)
+    }
+}
+FD_from_random <- function(pool, n, traitdata, bd, runs=100, 
+                           get_volume = T, samples.per.point = 100, .parallel = F){
+  if(runs<1){cat("ERROR: 'run' has to be higher than 1") ; stop()}
+  if(n < 3) { return(rep(NA, runs)) } # do not calculate FD for less than 3 species
+  else{
+    if (length(pool) == 0) { return(rep(NA, runs)) }
+    else{
+      if(!.parallel){
+        replicate(runs, FD_random(pool, 
+                                  n, 
+                                  traitdata, 
+                                  bd, 
+                                  get_volume = get_volume, 
+                                  samples.per.point = samples.per.point))
+      }
+      else{
+        ncores <- detectCores()
+        cl <- makeCluster(ncores)
+        
+        clusterExport(cl, c("pool","n","bd","get_volume", 
+                            "samples.per.point", "FD_random"), envir = .GlobalEnv)
+        
+        pbreplicate(runs, FD_random(pool, 
+                                    n, 
+                                    traitdata, 
+                                    bd, 
+                                    get_volume = get_volume, 
+                                    samples.per.point = samples.per.point),
+                    cl = cl)
+        stopCluster(cl)
+      }
+    }
+  }
+}
+
+
+# calculates hypervolume overlap statistics from two given hypervolumes
+hyper_stats <- function(hvol1, hvol2){
+  if(is.null(hvol1) | is.null(hvol2) | is.na(hvol1) | is.na(hvol2)){
+    return(NA)
+  }
+  else{
+    get_volume(hypervolume_set(hvol1, hvol2, 
+                               check.memory = FALSE, 
+                               verbose = FALSE)[[3]]) # get the intersect area
+    
+  }
+}
+
+
+#### function to random sample n species in a community and calc pd
+#### Useful to calculate SES PD-loss for communities
+# n = number of species in a communtiy
+# com = community dataset
+# phy = phylogenetic tree
+random.drop <- function(n, com, phy){
+  # species in community i
+  tipnames <- names(com)[which(com==1)]
+  # random sample n species from community i
+  sp.tmp <- sample(1:length(tipnames), n, replace = F)
+  # these are the randomly sampled species
+  tipnames <- tipnames[sp.tmp]
+  # calculate PD
+  trx <- drop.tip(tree, phy$tip.label[-na.omit(match(tipnames, phy$tip.label))])
+  return(sum(trx$edge.length))
+}
+
+#### function to random sample n species and calc FD
+#### Useful to calculate SES FD-loss for the communities
+# n = number of species in a communtiy
+# com = community dataset
+# td = trait dataset
+random.fd <- function(n, com, td){
+  # species in community i
+  tipnames <- names(com)[which(com[i,]==1)]
+  # random sample n species from community i
+  sp.tmp <- sample(1:length(tipnames), n, replace = F)
+  # these are the randomly sampled species
+  tipnames <- tipnames[sp.tmp]
+  # calculate FD
+  tmp <- hypervolume_gaussian(td[tipnames,], kde.bandwidth = bandw, verbose = F)
+  tmp <- get_volume(tmp)
+}
+
+#### function to random sample n tips and calc FD
+#### Useful to calculate SES FD for the complete tree
+# n = number of species in a communtiy
+# td = trait dataset
+random.fd.all <- function(n, td){
+  require(hypervolume)
+  # random sample X species from the pool
+  sp.tmp <- sample(1:nrow(td), n, replace = F)
+  # calculate FD
+  tmp <- hypervolume_gaussian(td[sp.tmp,], kde.bandwidth = bandw, verbose = F)
+  tmp <- get_volume(tmp)
+}
+
+# Panel cor functions
+panel.cor <- function(x, y, digits=2, cex.cor)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y))
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  test <- cor.test(x,y)
+  Signif <- ifelse(round(test$p.value,3)<0.001,"p<0.001",paste("p=",round(test$p.value,3)))  
+  text(0.5, 0.25, paste("r=",txt))
+  text(.5, .75, Signif)
+}
+panel.smooth<-function (x, y, col = "blue", bg = NA, pch = 18, 
+                        cex = 0.8, col.smooth = "red", span = 2/3, iter = 3, ...) 
+{
+  points(x, y, pch = pch, col = col, bg = bg, cex = cex)
+  ok <- is.finite(x) & is.finite(y)
+  if (any(ok)) 
+    lines(stats::lowess(x[ok], y[ok], f = span, iter = iter), 
+          col = col.smooth, ...)
+}
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="cyan", ...)
+}
+
+## Gives count, mean, standard deviation, standard error of the mean, and confidence interval (default 95%).
+##   data: a data frame.
+##   measurevar: the name of a column that contains the variable to be summariezed
+##   groupvars: a vector containing names of columns that contain grouping variables
+##   na.rm: a boolean that indicates whether to ignore NA's
+##   conf.interval: the percent range of the confidence interval (default is 95%)
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+    library(plyr)
+
+    # New version of length which can handle NA's: if na.rm==T, don't count them
+    length2 <- function (x, na.rm=FALSE) {
+        if (na.rm) sum(!is.na(x))
+        else       length(x)
+    }
+
+    # This does the summary. For each group's data frame, return a vector with
+    # N, mean, and sd
+    datac <- ddply(data, groupvars, .drop=.drop,
+      .fun = function(xx, col) {
+        c(N    = length2(xx[[col]], na.rm=na.rm),
+          mean = median   (xx[[col]], na.rm=na.rm),
+          sd   = sd     (xx[[col]], na.rm=na.rm)
+        )
+      },
+      measurevar
+    )
+
+    # Rename the "mean" column    
+    datac <- rename(datac, c("mean" = measurevar))
+
+    datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+
+    # Confidence interval multiplier for standard error
+    # Calculate t-statistic for confidence interval: 
+    # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+    ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+    datac$ci <- datac$se * ciMult
+
+    return(datac)
+}
+```
+
+# Convert Status to extinction probability following Mooers et al. 2008 Plos One
+Extinction probabilities for the next 100 years 
+LC = 0.0001
+NT = 0.01 
+VU = 0.1
+EN = 0.667 
+CR = 0.999
+```{r eval = F, results="hide"}
+
+IUCN$prob <- NA
+IUCN$prob[which(IUCN$IUCN == "LC")] <- 1 - 0.0001 #(0.9999)
+IUCN$prob[which(IUCN$IUCN == "NT")] <- 1 - 0.01 #(0.99)
+IUCN$prob[which(IUCN$IUCN == "VU")] <- 1 - 0.1 #(0.9)E
+IUCN$prob[which(IUCN$IUCN == "EN")] <- 1 - 0.667 #(0.333)
+IUCN$prob[which(IUCN$IUCN == "CR")] <- 1 - 0.999 #(0.001)
+
+# Richness maps per threat
+plot(rasterFromXYZ(data.frame(XY,rowSums(occr[which(IUCN$prob <= .9)]))))
+
+```
+
+# Predict survivors
+```{r eval = F, results="hide"}
+current_species <- colnames(occr)
+future_species <- replicate(100, # 100 null future comunities based on ...
+                            rbinom(current_species, # this list of species
+                                   1, # one coint tossed (no need for more because we are replicating above)
+                                   IUCN$prob)) # these survivor probabilities 
+future_species_ <- data.frame(Species = current_species, 
+                              Status = IUCN$IUCN,
+                              Prob = IUCN$prob,
+                              future_species)
+
+# Check
+# View(data.frame(future_species_[,1:3], rowSums(future_species_[,-1:-3])))
+# plot(IUCN$prob, rowSums(future_species_[,-1:-3]))
+future_species <- future_species_[,-1:-3]
+```
+
+# Random future species
+Shuffle IUCN probabilities and get the null future species list
+
+```{r eval = F, results="hide"}
+
+random_species <- replicate(100, # 100 null future comunities based on ...
+                            rbinom(current_species, # this list of species
+                                   1, # one coint tossed (no need for more because we are replicating above)
+                                   IUCN$prob[shuffle(length(current_species))])) # shuffle survivor probabilities 
+
+random_species <- data.frame(random_species)
+# plot(IUCN$prob, rowSums(random_species))
+
+```
+
+
+# 1. All amphibians' analysis:
+## 1.1. Calculate species richness loss
+```{r eval = F, results="hide"}
+# SPD total current
+SPD_c <- length(current_species) 
+
+# SPD total future
+SPD_f <- colSums(future_species)  
+
+# SPD total loss
+SPD_loss <- SPD_c - SPD_f 
+
+# % SPD total loss
+SPD_loss.p <- (SPD_loss/SPD_c)*100
+
+# Random future
+SPD_rf <- colSums(random_species)  
+
+# SPD total random loss
+SPD_loss_r <- SPD_c - SPD_rf
+
+# % SPD total random loss
+SPD_loss_r.p <- (SPD_loss_r/SPD_c)*100
+
+```
+
+Current total richness: `r SPD_c`  
+
+Future total richness: `r summary(SPD_f)`  
+  
+Richness loss: `r summary(SPD_loss)`  
+
+Richness loss %: `r summary(SPD_loss.p)`  
+   
+   
+## 1.2. Calculate phylogenetic diversity (PD) loss
+```{r eval = F, results="hide"}
+# PD total current
+PD_c <- sum(tree$edge.length) 
+
+# PD total future
+PD_f <- apply(future_species, 2, 
+               function(x) 
+                 PD_from_list(current_species[which(x==1)], tree)) 
+
+# PD total loss
+PD_loss <- PD_c - PD_f
+
+#Test if PD loss is higher or lower than random.
+PD_loss_P <- t.test(PD_f, mu =  PD_c) # t.test
+
+# % PD total loss
+PD_loss.p <- (PD_loss/PD_c)*100
+
+# PD future random
+PD_f_r <- apply(random_species, 2, 
+               function(x) 
+                 PD_from_list(current_species[which(x==1)], tree)) 
+
+# PD total loss random
+PD_loss_random <- PD_c - PD_f_r
+
+# % PD total random loss
+PD_loss_r.p <- (PD_loss_random/PD_c)*100
+
+```
+  
+Current PD: `r PD_c`  
+
+Future PD: `r summary(PD_f)`  
+  
+PD loss: `r summary(PD_loss)`  
+
+PD loss %: `r summary(PD_loss.p)`  
+  
+## 1.3. Calculate functional diversity (FD) loss
+```{r eval = F, results="hide"}
+# We estimated bandwidths using the method of Silverman.
+bandwidth_T <- estimate_bandwidth(traits)
+bandwidth_cross <- estimate_bandwidth(traits, method = "cross-validation")
+
+# bandwidth experiment
+# construct hypervolumes with bandwidth values ranging from 0.01 and 0.5. Check it overlap val
+
+# FD total current
+hyperT <- hypervolume_gaussian(name = "current",
+                               data = traits, 
+                               samples.per.point = 100,
+                               kde.bandwidth = bandwidth_T,
+                               verbose = F)
+
+FD_c <- get_volume(hyperT)
+
+# FD total future
+
+ncores <- detectCores()
+cl <- makeCluster(30)
+registerDoParallel(cl)
+
+FD_f <- 
+  foreach(i=1:100, .combine = "cbind", .packages=c('hypervolume')) %dopar% { 
+    
+    vol <- hypervolume_gaussian(name = "future",
+                                traits[which(future_species[,i]==1),], 
+                                samples.per.point = 100,
+                                kde.bandwidth = bandwidth_T,
+                                verbose = F)
+    
+    overla <- hypervolume_set(hyperT, vol, check.memory = F, verbose = F)
+    overla2 <- hypervolume_overlap_statistics(overla)
+    
+    c(get_volume(overla), overla2)
+    
+  }
+# stop the cluster
+stopCluster(cl)
+
+FD_f_ <- data.frame(t(FD_f)) 
+
+# FD total loss
+# volume loss = current volume - future volume
+FD_loss <- FD_c - FD_f_$Intersection.of..current..future.
+# % volume loss 
+FD_loss.p <- (FD_loss/FD_c)*100
+
+# plot(FD_loss, FD_loss2)
+
+#Test if FD loss is higher or lower than random.
+FD_loss_P <- t.test(FD_f_$future, mu =  FD_c) # t.test
+
+
+# FD future random
+
+ncores <- detectCores()
+cl <- makeCluster(30)
+registerDoParallel(cl)
+
+FD_f_r <- 
+  foreach(i=1:100, .combine = "cbind", .packages=c('hypervolume')) %dopar% { 
+    
+    vol <- hypervolume_gaussian(name = "future",
+                                traits[which(random_species[,i]==1),], 
+                                samples.per.point = 100,
+                                kde.bandwidth = bandwidth_T,
+                                verbose = F)
+    
+    overla <- hypervolume_set(hyperT, vol, check.memory = F, verbose = F)
+    overla2 <- hypervolume_overlap_statistics(overla)
+    
+    c(get_volume(overla), overla2)
+    
+  }
+# stop the cluster
+stopCluster(cl)
+
+FD_f_r_ <- data.frame(t(FD_f_r))
+
+# FD total loss random
+# volume loss = current volume - future volume
+FD_loss_random <- FD_c - FD_f_r_$Intersection.of..current..future.
+# % volume loss 
+FD_loss_r.p <- (FD_loss_random/FD_c)*100
+
+
+```
+
+Current FD: `r FD_c`  
+
+Future FD: `r summary(FD_f_$future)`  
+  
+FD loss: `r summary(FD_loss)`  
+FD loss (fraction of current FD): `r summary(FD_loss2)`  
+
+FD loss %: `r summary(FD_loss.p)`  
+
+## Figure. Observed vs future predicted loss of PD and FD
+```{r echo=F}
+median.quartile <- function(x){
+  out <- quantile(x, probs = c(0.25,0.5,0.75))
+  names(out) <- c("ymin","y","ymax")
+  return(out) 
+}
+
+# SPD future compare dataset
+SPD_comp_data <- rbind(data.frame(type = "Predicted-loss", loss = SPD_loss.p),
+                       data.frame(type = "Random-loss", loss = SPD_loss_r.p))
+
+SPD_loss_plot <- ggplot(SPD_comp_data, aes(y = loss, x = type, color = type))+
+  geom_jitter(alpha = .5)+
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  ylab("Species loss")+xlab("")
+
+summary(aov(loss~type, SPD_comp_data))
+
+# PD future compare dataset
+PD_comp_data <- rbind(data.frame(type = "Predicted-loss", loss = PD_loss.p),
+                      data.frame(type = "Random-loss", loss = PD_loss_r.p))
+
+PD_loss_plot <- ggplot(PD_comp_data, aes(y = loss, x = type, color = type))+
+  geom_jitter(alpha = .5)+
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  ylab("Phylogenetic diversity loss")+xlab("")
+
+summary(aov(loss~type, PD_comp_data))
+
+# FD future compare dataset
+FD_comp_data <- rbind(data.frame(type = "Predicted-loss", loss = FD_loss.p),
+                      data.frame(type = "Random-loss", loss = FD_loss_r.p))
+
+FD_loss_plot <- ggplot(FD_comp_data, aes(y = loss, x = type, color = type))+
+  geom_jitter(alpha = .5)+
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  ylab("Functional diversity loss")+xlab("")
+
+summary(aov(loss~type, FD_comp_data))
+
+# 
+pdf("Figs/Fig_1.pdf", width = 7, height = 10/3)
+plot_grid(PD_loss_plot, FD_loss_plot, labels = c('(a)', '(b)'), ncol = 2)
+dev.off()
+
+
+
+```
+
+*** 
+
+\newpage
+
+
+# 2. Grid cell's analysis
+## 2.1. Species richness
+```{r eval = F}
+
+NCell <- nrow(occr)
+
+
+# SPD community current
+SPD_cc <- rowSums(occr)
+
+# SPD community future
+SPD_cf <- pblapply(1:100, function(x) rowSums(occr[,which(future_species[,x]==1)]))
+SPD_cf <- do.call("cbind", SPD_cf)
+
+# SPD community loss
+SPD_closs <- apply(SPD_cf, 2, function(x) SPD_cc - x)
+
+# % SPD loss
+SPD_closs.p <- apply(SPD_closs, 2, function(x) (x/SPD_cc)*100)
+
+```
+
+
+## 2.2. Phylogenetic diversity (PD) loss
+```{r eval = F}
+###########################
+
+# PD current
+PD_cc <- pblapply(1:NCell, function(x) PD_from_list(current_species[which(occr[x,]==1)], tree))
+PD_cc <- unlist(PD_cc)  
+# takes 4 minutes
+# saveRDS(PD_cc, "PD_cc")
+# PD_cc <- readRDS("PD_cc")
+
+plot(rasterFromXYZ(data.frame(XY,PD_cc)))
+
+# PD current random
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+clusterExport(cl, c("PD_from_random","PD_random","SPD_cc","current_species", 
+                    "occr", "Realm", "drop.tip", "tree"), envir = .GlobalEnv)
+PD_cr <- pblapply(1:NCell, function(x) 
+  PD_from_random(
+    pool = current_species[which(colSums(occr[which(Realm == Realm[x]),])>0)], 
+    n = SPD_cc[x], 
+    phy = tree,
+    runs = 100),
+  cl = cl
+)
+# stop the cluster
+stopCluster(cl)
+PD_cr <- do.call("rbind", PD_cr) 
+# takes 2 minutes!!!
+# saveRDS(PD_cr, "PD_cr")
+# PD_cr <- readRDS("PD_cr")
+
+PD_cr_mean <- unlist(apply(PD_cr, 1, mean))
+PD_cr_sd <- unlist(apply(PD_cr, 1, sd))
+  
+# PD current SES
+PD_cc_ses <- (PD_cc - PD_cr_mean)/PD_cr_sd
+
+# plot(rasterFromXYZ(data.frame(XY,PD_cc_ses)))
+# plot(PD_cc,PD_cc_ses)
+
+###########################
+# PD community future
+# set the cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+# calculate
+NCell <- nrow(occr)
+
+start_time <- Sys.time()
+
+PD_cf <- foreach(i=1:100, .combine='cbind', .packages='ape') %dopar% { 
+  occu <- occr[,which(future_species[,i]==1)] # occr future i
+  unlist(lapply(1:NCell, function(x) PD_from_list(names(occu)[which(occu[x,]==1)], tree)))
+}
+end_time <- Sys.time()
+end_time-start_time
+# stop the cluster
+stopCluster(cl)
+# takes 17min
+# saveRDS(PD_cf, "PD_cf")
+# PD_cf <- readRDS("PD_cf")
+
+# PD community loss
+PD_closs <- apply(PD_cf, 2, function(x) PD_cc - x)
+# PDloss = 0 if no species were loss
+for(i in 1:100){
+  zeroloss <- which(SPD_closs[,i]==0)
+  PD_closs[zeroloss,i] <- 0
+}
+
+PD_closs_ <- matrix(nrow = NCell, ncol = 100)
+for(i in 1:100){
+  PD_closs_[,i] <- PD_closs[,i]
+  PD_closs_[which(SPD_closs[,i]<1),i] <- NA
+}
+
+# % PD loss
+PD_closs.p <- apply(PD_closs, 2, function(x) (x/PD_cc)*100)
+
+plot(rasterFromXYZ(data.frame(XY,apply(PD_closs.p,1,mean))))
+
+###########################
+# PD future random
+# set the cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+# calculate
+NCell <- nrow(occr)
+
+start_time <- Sys.time()
+
+PD_cf_r <- foreach(i=1:100, .packages='ape') %:% 
+  foreach(j=1:NCell, .combine='rbind', .packages='ape') %dopar% { 
+    occu <- occr[,which(future_species[,i]==1)] # occr future i
+    occu <- occu[which(Realm == Realm[j]),]
+    pool_ <- colnames(occu)[which(colSums(occu)>0)]
+    
+    PD_from_random(
+      pool = pool_, 
+      n = SPD_cf[j], 
+      phy = tree,
+      runs = 100)
+  }
+
+end_time <- Sys.time()
+end_time-start_time
+# takes 3:30 hours
+# stop the cluster
+stopCluster(cl)
+# saveRDS(PD_cf_r, "PD_cf_r")
+# PD_cf_r <- readRDS("PD_cf_r")
+
+# PDloss in each random scenario
+PD_closs_r <- lapply(PD_cf_r, function(x) apply(x, 2, function(i) PD_cc - i)) 
+
+# PDloss = 0 if no species were loss
+# for(i in 1:100){
+#   zeroloss <- which(SPD_closs[,i]==0)
+#   PD_closs_r[[i]][zeroloss,] <- 0
+# }
+
+# mean/sd of PDloss across 100 random simulated future communities, and for each of the 100 predicted future survivors
+PD_closs_r_mean <- lapply(PD_closs_r, function(x) apply(x, 1, mean)) 
+PD_closs_r_mean <- do.call("cbind",PD_closs_r_mean)
+
+PD_closs_r_sd <- lapply(PD_closs_r, function(x) apply(x, 1, sd))
+PD_closs_r_sd <- do.call("cbind",PD_closs_r_sd)
+  
+# PD future SES
+PD_closs_ses <- lapply(1:100, function(x) (PD_closs[,x] - PD_closs_r_mean[,x])/PD_closs_r_sd[,x])
+PD_closs_ses <- do.call("cbind",PD_closs_ses)
+
+PD_closs_ses_mean <- apply(PD_closs_ses, 1, function(x) mean(x, na.rm = T))
+PD_closs_ses_sd <- apply(PD_closs_ses, 1, function(x) mean(sd, na.rm = T))
+
+PD_closs_ses_mean_ <- unlist(lapply(1:NCell, function(x) 
+  mean(PD_closs_ses[x,1:10][which(SPD_closs[x,1:10]>=1)], na.rm = T)))
+PD_closs_ses_sd_ <- unlist(lapply(1:NCell, function(x) 
+  sd(PD_closs_ses[x,1:10][which(SPD_closs[x,1:10]>=1)], na.rm = T)))
+
+plot(rasterFromXYZ(data.frame(XY,PD_closs_ses_mean)))
+plot(rasterFromXYZ(data.frame(XY,PD_closs_ses_mean_)))
+
+PD_closs_ses_ <- matrix(nrow = NCell, ncol = 100)
+for(i in 1:100){
+  PD_closs_ses_[,i] <- PD_closs_ses[,i]
+  PD_closs_ses_[which(SPD_closs[,i]<1),i] <- NA
+}
+```
+
+### Plot
+```{r eval = F}
+# Plot mean PDloss 
+PD_closs_mean <- apply(PD_closs, 1, mean)
+plot(rasterFromXYZ(data.frame(XY,PD_closs_mean)))
+# Plot mean PDloss SES
+plot(rasterFromXYZ(data.frame(XY,PD_closs_ses_mean)))
+# Plot sd PDloss SES
+plot(rasterFromXYZ(data.frame(XY,PD_closs_ses_sd)))
+# Correlation PDloss and PDloss SES
+plot(unlist(apply(PD_closs, 1, mean)),PD_closs_ses_mean)
+# Correlation SPDloss and PDloss SES
+plot(log(unlist(apply(SPD_closs, 1, mean))+1),PD_closs_ses_mean)
+# Correlation SPDloss and sd PDloss SES
+plot(log(unlist(apply(SPD_closs, 1, mean))+1),PD_closs_ses_sd)
+
+
+### Compare 
+# PDloss future vs random
+
+PD_closs_mean_ <- unlist(lapply(1:NCell, function(x) 
+  mean(PD_closs[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+PD_closs_r_mean_ <- unlist(lapply(1:NCell, function(x) 
+  mean(PD_closs_r_mean[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+PD_comp_data <- rbind(data.frame(type = "Predicted-loss", 
+                                 PD = PD_closs_mean_),
+                      data.frame(type = "Random-loss", 
+                                 PD = PD_closs_r_mean_))
+
+ggplot(PD_comp_data, aes(y = PD+1, x = type, color = type))+
+  geom_jitter(alpha = .5, width = .3)+
+  geom_violin(draw_quantiles = T, trim = F, alpha = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  #scale_y_log10() + 
+  ylab("PDloss") + xlab("")
+
+summary(aov(PD~type, PD_comp_data))
+mean(na.omit(PD_closs_mean)) # loss
+mean(na.omit(PD_closs_r_mean_)) # random
+
+
+# compare 
+# current vs future
+PD_cf_mean <- unlist(lapply(1:NCell, function(x) 
+  mean(PD_cf[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+PD_comp_data <- data.frame(
+  rbind(data.frame(type = "Current", PD = PD_cc[which(SPD_closs>0)]),
+        data.frame(type = "Future", PD = PD_cf_mean)))
+
+PD_loss_comb_plot <- ggplot(PD_comp_data, aes(y = PD+1, x = type, color = type))+
+  geom_jitter(alpha = .5, width = .3)+
+  geom_violin(draw_quantiles = c(.25,.5,.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  #scale_y_log10() + 
+  ylab("Phylogenetic diversity (Myr)") + xlab("")
+
+summary(aov(PD~type, PD_comp_data))
+
+```
+
+
+## 2.3. Functional diversity (FD) loss
+```{r eval = F}
+# estimated bandwidths for each grid cell using the method of silverman
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+clusterExport(cl, c("FD_from_list","traits","occr","estimate_bandwidth","SPD_cc"), 
+              envir = .GlobalEnv)
+
+bandw.exp <- pblapply(1:NCell, function(i)
+  
+  ifelse(SPD_cc[i] < 3, 
+         c(Axis1=NA,Axis2=NA,Axis3=NA), 
+         estimate_bandwidth(traits[names(occr)[which(occr[i,]==1)],])),
+  cl = cl)
+
+# stop the cluster
+stopCluster(cl)
+# takes 14 seconds
+saveRDS(bandw.exp, "bandw.exp")
+# bandw.exp <- readRDS("bandw.exp")
+
+bandw.exp <- do.call("rbind",bandw.exp)
+cor(log(Rich),bandw.exp[,1], use = "complete.obs") # bandwidth is not associated with richness.
+cor(log(Rich),bandw.exp[,2], use = "complete.obs") # bandwidth is not associated with richness.
+cor(log(Rich),bandw.exp[,3], use = "complete.obs") # bandwidth is not associated with richness.
+cor(log(Rich),apply(bandw.exp,1,mean), use = "complete.obs") # bandwidth is not associated with richness.
+
+bandw.exp <- na.omit(bandw.exp)
+
+bandw <- median(bandw.exp)
+
+save.image("PD+FD_erosion_new.RData")
+
+###########################
+# FD current
+
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+clusterExport(cl, c("FD_from_list","traits","occr","bandwidth_T","bandw","bandwidth_cross",
+                    "current_species", "hypervolume_gaussian", "hypervolume", "get_volume"), envir = .GlobalEnv)
+
+FD_cc_ <- pblapply(1:NCell, function(x) 
+  FD_from_list(sps = current_species[which(occr[x,]==1)], 
+               traitdata = traits, 
+               samples.per.point = 100,
+               bd = bandwidth_T,
+               get_volume = F,
+               ),
+                  cl = cl)
+# stop the cluster
+stopCluster(cl)
+# takes 1 minute
+# saveRDS(FD_cc_, "FD_cc_")
+# FD_cc_ <- readRDS("FD_cc_")
+FD_cc <- lapply(FD_cc_, function(x) get_volume(x))
+FD_cc[sapply(FD_cc, is.null)] <- NA
+FD_cc <- unlist(FD_cc)
+
+# plot(rasterFromXYZ(data.frame(XY,FD_cc)))
+
+# FD current random
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+clusterExport(cl, c("FD_from_random","FD_random","SPD_cc",
+                    "current_species","occr", "Realm", "traits",
+                    "bandwidth_T", "hypervolume_gaussian", "get_volume"), 
+              envir = .GlobalEnv)
+
+FD_cr_ <- pblapply(1:NCell, function(x) 
+  FD_from_random(
+    pool = current_species[which(colSums(occr[which(Realm == Realm[x]),])>0)], 
+    n = SPD_cc[x], 
+    traitdata = traits,
+    bd = bandwidth_T,
+    get_volume = F,
+    runs = 100),
+  cl = cl
+)
+# stop the cluster
+stopCluster(cl)
+# takes 1h13min minutes
+# saveRDS(FD_cr_, "FD_cr_")
+# FD_cr_ <- readRDS("FD_cr_")
+
+FD_cr <- pblapply(FD_cr_, 
+                  function(x) 
+                    lapply(x, function(y) get_volume(y)))
+
+FD_cr <- lapply(FD_cr, 
+                function(x) 
+                  unlist(lapply(x, function(y) ifelse(is.null(y),NA,y))))
+
+FD_cr <- docall("rbind", FD_cr)
+  
+FD_cr_mean <- unlist(apply(FD_cr, 1, mean))
+FD_cr_sd <- unlist(apply(FD_cr, 1, sd))
+  
+# FD current SES
+FD_cc_ses <- (FD_cc - FD_cr_mean)/FD_cr_sd
+
+# plot(rasterFromXYZ(data.frame(XY,FD_cc_ses)))
+# plot(FD_cc,FD_cc_ses)
+
+###########################
+# FD community future
+# set the cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+# calculate
+NCell <- nrow(occr)
+
+start_time <- Sys.time()
+
+FD_cf_ <- foreach(i=1:100, .packages='hypervolume') %dopar% { 
+  occu <- occr[,which(future_species[,i]==1)] # occr future i
+  lapply(1:NCell, function(x) 
+    FD_from_list(sps = names(occu)[which(occu[x,]==1)], 
+                 traitdata = traits, 
+                 bd = bandwidth_T,
+                 get_volume = F))
+}
+end_time <- Sys.time()
+end_time-start_time
+# stop the cluster
+stopCluster(cl)
+# takes 53min
+# saveRDS(FD_cf_, "FD_cf_")
+# FD_cf_ <- readRDS("FD_cf_")
+
+FD_cf <- pblapply(FD_cf_, function(x) unlist(lapply(x, function(y) ifelse(is.na(y), NA, get_volume(y)))))
+FD_cf <- do.call("cbind", FD_cf)
+  
+###########################
+# FD community loss
+ncores <- detectCores()
+cl <- makeCluster(5) # have to use this limited number of cores because too memnory been used
+registerDoParallel(cl)
+
+start_time <- Sys.time()
+
+FD_closs_ <- 
+  foreach(i=1:100, .combine='cbind', .packages=c('hypervolume')) %dopar% { 
+    
+    lapply(1:NCell, function(x)
+      FD_cc[x] - hyper_stats(FD_cc_[[x]], FD_cf_[[i]][[x]])
+    )
+  }
+end_time <- Sys.time()
+end_time-start_time
+# stop the cluster
+stopCluster(cl)
+# takes 20min
+# saveRDS(FD_closs_, "FD_closs_")
+# FD_closs_ <- readRDS("FD_closs_")
+
+FD_closs <- data.frame(apply(FD_closs_,2,as.numeric))
+# FDloss = 0 if no species were loss
+for(i in 1:100){
+  zeroloss <- which(SPD_closs[,i]==0)
+  FD_closs[zeroloss,i] <- 0
+}
+
+FD_closs_ <- matrix(nrow = NCell, ncol = 100)
+for(i in 1:100){
+  FD_closs_[,i] <- FD_closs[,i]
+  FD_closs_[which(SPD_closs[,i]<1),i] <- NA
+}
+
+# % FD loss
+FD_closs.p <- apply(FD_closs, 2, function(x) (x/FD_cc)*100)
+
+plot(rasterFromXYZ(data.frame(XY,apply(FD_closs,1,function(x) mean(x, na.rm = T)))))
+plot(rasterFromXYZ(data.frame(XY,apply(FD_closs.p,1,mean))))
+
+###########################
+# FD loss SES
+# set the cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+# calculate
+NCell <- nrow(occr)
+
+start_time_all <- Sys.time()
+
+# this is very computationally intense. Lets run for 10 of the 100 simulated future communities.
+FD_closs_ses_ <- matrix(nrow = NCell, ncol = 100)
+
+for(i in 1:100){ cat("run", i, "from", 100)
+  
+  start_time <- Sys.time()
+  
+  run.tmp <- foreach(j=1:NCell, .combine='c', .packages='hypervolume') %dopar% { 
+    
+    if(SPD_closs[j,i]==0){
+      return(NA)
+    }
+    else{
+      occu <- occr[,which(future_species[,i]==1)] # occr future i
+      occu <- occu[which(Realm == Realm[j]),]
+      pool_ <- colnames(occu)[which(colSums(occu)>0)]
+      
+      null_FD <- FD_from_random(
+        pool = pool_, 
+        n = SPD_cf[j],
+        traitdata = traits, 
+        bd = bandwidth_T,
+        get_volume = FALSE,
+        runs = 100)
+      
+      null_FD_loss <- as.numeric(unlist(lapply(1:100, function(x) hyper_stats(FD_cc_[[j]], null_FD[[x]]))))
+      mean_null <- mean(null_FD_loss, na.rm = T)
+      sd_null <- sd(null_FD_loss, na.rm = T)
+      
+      # SES FDloss
+      return((FD_closs[j,i] - mean_null) / sd_null)
+    }
+  }
+  
+  FD_closs_ses_[,i] <- run.tmp
+  
+  end_time <- Sys.time()
+  fin_time <- end_time-start_time
+  
+  cat("\nTime run",i,"=",fin_time,"minutes\n",
+      "Expected time to finish:\n", 
+      fin_time*(100-i), "minutes\n",
+      (fin_time*(100-i))/60, "hours\n",
+      ((fin_time*(100-i))/60)/24, "days\n",
+      "--------------------\n")
+}
+
+end_time_all <- Sys.time()
+end_time_all-start_time_all
+# stop the cluster
+stopCluster(cl)
+# takes 1.91 days
+# saveRDS(FD_closs_ses, "FD_closs_ses")
+FD_closs_ses <- readRDS("FD_closs_ses")
+
+FD_closs_ses_mean <- apply(FD_closs_ses, 1, function(x) mean(x, na.rm = T))
+FD_closs_ses_sd <- apply(FD_closs_ses, 1, function(x) mean(sd, na.rm = T))
+
+FD_closs_ses_mean_ <- unlist(lapply(1:NCell, function(x) 
+  mean(FD_closs_ses[x,][which(SPD_closs[x,]>=1)], na.rm = T)))
+FD_closs_ses_sd_ <- unlist(lapply(1:NCell, function(x) 
+  sd(FD_closs_ses[x,][which(SPD_closs[x,]>=1)], na.rm = T)))
+
+plot(rasterFromXYZ(data.frame(XY,FD_closs_ses_mean)))
+plot(rasterFromXYZ(data.frame(XY,FD_closs_ses_mean_)))
+
+FD_closs_ses_ <- matrix(nrow = NCell, ncol = 100)
+for(i in 1:100){
+  FD_closs_ses_[,i] <- FD_closs_ses[,i]
+  FD_closs_ses_[which(SFD_closs[,i]<1),i] <- NA
+}
+
+```
+
+
+### Plot
+```{r eval = F}
+# Plot mean FDloss 
+FD_closs_mean <- apply(FD_closs, 1, mean)
+plot(rasterFromXYZ(data.frame(XY,FD_closs_mean)))
+# Plot mean FDloss SES
+plot(rasterFromXYZ(data.frame(XY,FD_closs_ses_mean))) 
+# Plot sd FDloss SES
+plot(rasterFromXYZ(data.frame(XY,FD_closs_ses_sd)))
+# Correlation FDloss and FDloss SES
+plot(unlist(apply(FD_closs, 1, mean)),FD_closs_ses_mean)
+# Correlation SPDloss and FDloss SES
+plot(log(unlist(apply(SPD_closs, 1, mean))+1),FD_closs_ses_mean)
+# Correlation SPDloss and sd FDloss SES
+plot(log(unlist(apply(SPD_closs, 1, mean))+1),FD_closs_ses_sd)
+
+
+### Compare 
+# FDloss future vs random
+
+FD_closs_mean_ <- unlist(lapply(1:NCell, function(x) 
+  mean(FD_closs[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+FD_closs_r_mean_ <- unlist(lapply(1:NCell, function(x) 
+  mean(FD_closs_r_mean[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+FD_comp_data <- rbind(data.frame(type = "Predicted-loss", 
+                                 FD = FD_closs_mean_),
+                      data.frame(type = "Random-loss", 
+                                 FD = FD_closs_r_mean_))
+
+ggplot(FD_comp_data, aes(y = FD+1, x = type, color = type))+
+  geom_jitter(alpha = .5, width = .3)+
+  geom_violin(draw_quantiles = T, trim = F, alpha = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  #scale_y_log10() + 
+  ylab("FDloss") + xlab("")
+
+summary(aov(FD~type, FD_comp_data))
+mean(na.omit(FD_closs_mean)) # loss
+mean(na.omit(FD_closs_r_mean_)) # random
+
+
+# compare 
+# current vs future
+FD_cf_mean <- unlist(lapply(1:NCell, function(x) 
+  mean(FD_cf[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+FD_comp_data <- data.frame(
+  rbind(data.frame(type = "Current", FD = FD_cc[which(SPD_closs>0)]),
+        data.frame(type = "Future", FD = FD_cf_mean)))
+
+FD_loss_comb_plot <- ggplot(FD_comp_data, aes(y = FD+1, x = type, color = type))+
+  geom_jitter(alpha = .5, width = .3)+
+  geom_violin(draw_quantiles = c(.25,.5,.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  #scale_y_log10() + 
+  ylab(bquote("Functional diversity "~(SD^3))) + xlab("")
+
+summary(aov(FD~type, FD_comp_data))
+
+```
+
+## Figure. Community observed vs future predicted PD and FD
+```{r eval = F}
+# current vs future
+## SPD
+SPD_cf_mean <- unlist(lapply(1:NCell, function(x) 
+  mean(SPD_cf[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+SPD_comp_data <- data.frame(
+  rbind(data.frame(type = "Current", SPD = SPD_cc[which(SPD_closs>0)]),
+        data.frame(type = "Future", SPD = SPD_cf_mean)))
+
+SPD_loss_comb_plot <- ggplot(SPD_comp_data, aes(y = SPD+1, x = type, color = type))+
+  geom_jitter(alpha = .3, width = .3)+
+  geom_violin(draw_quantiles = c(.25,.5,.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c("cornflowerblue", "tomato")) +
+  #scale_y_log10() + 
+  ylab("Species richness") + xlab("") +
+  theme(aspect.ratio=1)
+
+summary(aov(SPD~type, SPD_comp_data))
+
+## PD
+PD_cf_mean <- unlist(lapply(1:NCell, function(x) 
+  mean(PD_cf[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+PD_comp_data <- data.frame(
+  rbind(data.frame(type = "Current", PD = PD_cc[which(SPD_closs>0)]),
+        data.frame(type = "Future", PD = PD_cf_mean)))
+
+PD_loss_comb_plot <- ggplot(PD_comp_data, aes(y = PD+1, x = type, color = type))+
+  geom_jitter(alpha = .3, width = .3)+
+  geom_violin(draw_quantiles = c(.25,.5,.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  scale_color_manual(values = c("cornflowerblue", "tomato")) +
+  #scale_y_log10() + 
+  ylab("Phylogenetic diversity (Myr)") + xlab("")+
+  theme(aspect.ratio=1)
+
+summary(aov(PD~type, PD_comp_data))
+
+## FD
+FD_cf_mean <- unlist(lapply(1:NCell, function(x) 
+  mean(FD_cf[x, which(SPD_closs[x,] > 0)], na.rm = T)))
+
+FD_comp_data <- data.frame(
+  rbind(data.frame(type = "Current", FD = FD_cc[which(SPD_closs[,1]>0)]),
+        data.frame(type = "Future", FD = FD_cf_mean)))
+
+FD_loss_comb_plot <- ggplot(FD_comp_data, aes(y = FD*100, x = type, color = type))+
+  geom_jitter(alpha = .3, width = .3)+
+  geom_violin(draw_quantiles = c(.25,.5,.75), trim = F, alpha = .5, width = .5)+
+  stat_compare_means(method = "aov", label =  "p.signif") +
+  theme(legend.position = "none")  +
+  scale_color_manual(values = c("cornflowerblue", "tomato")) +
+  #scale_y_log10() + 
+  ylab(bquote("Functional diversity "~(SD^3))) + xlab("")+
+  theme(aspect.ratio=1)
+
+summary(aov(FD~type, FD_comp_data))
+
+
+
+pdf("Figs/Fig_2_.pdf", width = 10/3, height = 10)
+plot_grid(SPD_loss_comb_plot,
+          PD_loss_comb_plot, 
+          FD_loss_comb_plot, 
+          labels = c('(a)', '(b)', '(c)'), 
+          align = 'v',
+          nrow = 3)
+dev.off()
+
+```
+
+
+# Create dataset
+```{r eval = F, echo = F}
+dataset <- data.frame(XY, 
+                      SPD_cc, # Current richness 
+                      SPD_cf_mean = apply(SPD_cf,1,mean), # Future richness 
+                      SPD_closs = apply(SPD_closs,1,mean), # Richness loss
+                      SPD_closs.p = apply(SPD_closs.p,1,mean), # Richness loss %
+                      PD_cc, # Current PD 
+                      PD_cc_ses, # Current PD ses
+                      PD_cf = apply(PD_cf,1,mean), # Future PD 
+                      PD_closs = unlist(apply(PD_closs_,1,function(x) mean(x, na.rm = T))), # PD loss
+                      PD_closs.p = apply(PD_closs.p,1,mean), # PD loss %
+                      PD_closs_ses = unlist(lapply(1:NCell, function(x) 
+                        mean(PD_closs_ses_[x,][which(SPD_closs[x,]>=1)], na.rm = T))), # PD loss
+                      FD_cc, # Current FD 
+                      FD_cc_ses, # Current FD ses
+                      FD_cf = apply(FD_cf,1,mean), # Future FD 
+                      FD_closs = unlist(apply(FD_closs_,1,function(x) mean(x, na.rm = T))), # FD loss
+                      FD_closs.p = apply(FD_closs.p,1,mean), # FD loss %
+                      FD_closs_ses = unlist(lapply(1:NCell, function(x) 
+                        mean(FD_closs_ses_[x,][which(SPD_closs[x,]>=1)], na.rm = T))), # FD loss
+                      Realm)
+
+```
+
+# save image
+```{r eval = F, echo = F}
+save.image("PD+FD_erosion_new.RData")
+```
+
+*** 
+
+\newpage
+
+# 4. Test correlations between the loss of multiple dimensions of diversity
+Is PD-loss a good predictor of FD-loss?
+```{r eval = F}
+#Make a matrix of coordinates (X and Y coordinates)
+coords<-as.matrix(dataset[,1:2])
+
+#######################
+#Define neighbourhood
+k1 <- knn2nb(knearneigh(coords))
+all.linked <- max(unlist(nbdists(k1, coords)))
+nb1.5<-dnearneigh(coords,0,all.linked)
+#Spatial weights, illustrated with coding style "W" (row standardized)
+nlw<-nb2listw(nb1.5, glist=NULL, style="W", zero.policy=FALSE)
+
+
+#Make a matrix of coordinates (X and Y coordinates)
+coords2<-as.matrix(dataset[which(dataset$SPD_closs>0), 1:2])
+
+#######################
+#Define neighbourhood
+k1 <- knn2nb(knearneigh(coords2))
+all.linked <- max(unlist(nbdists(k1, coords2)))
+nb1.5<-dnearneigh(coords2,0,all.linked)
+#Spatial weights, illustrated with coding style "W" (row standardized)
+nlw2<-nb2listw(nb1.5, glist=NULL, style="W", zero.policy=FALSE)
+
+##############################################
+# Spatial models
+##############################################
+
+#######################
+modelos <- list(as.formula(paste("FD_cc~", "PD_cc",sep = "")), # PD vs FD
+                as.formula(paste("FD_cc_ses~", "PD_cc_ses",sep = "")), # PDses vs FDses
+                
+                as.formula(paste("PD_cc~", "SPD_cc",sep = "")), # richness vs PD
+                as.formula(paste("FD_cc~", "SPD_cc",sep = "")), # richness vs FD
+                
+                as.formula(paste("PD_cc_ses~", "SPD_cc",sep = "")), # richness vs PDses
+                as.formula(paste("FD_cc_ses~", "SPD_cc",sep = "")), # richness vs FDses
+                
+                as.formula(paste("FD_closs~", "PD_closs",sep = "")), # PDloss vs FDloss
+                as.formula(paste("FD_closs_ses~", "PD_closs_ses",sep = "")), # PDloss.ses vs FDloss.ses
+               
+                as.formula(paste("PD_cc~", "SPD_closs",sep = "")), # richness.loss vs PDloss
+                as.formula(paste("FD_cc~", "SPD_closs",sep = "")), # richness.loss vs FDloss
+                
+                as.formula(paste("PD_cc_ses~", "SPD_closs",sep = "")), # richness vs PDloss.ses
+                as.formula(paste("FD_cc_ses~", "SPD_closs",sep = "")) # richness vs FDloss.ses
+                )
+
+# set cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+start_time <- Sys.time()
+
+models <- foreach(i=1:length(modelos), .packages=c('pgirmess','spdep')) %dopar% { 
+  
+  if(i<=6){
+    dataset_use <- dataset
+    nlw_use <- nlw
+  }
+  
+  if(i>6){
+    dataset_use <- dataset[which(dataset$SPD_closs>0),]
+    nlw_use <- nlw2
+  }
+  
+  s_model <- errorsarlm(lm(modelos[[i]], data=dataset_use), listw=nlw_use)
+  s_AICc <- AICc(s_model)
+  
+  l_model <- lm(modelos[[i]], data=dataset_use)
+  l_AICc <- AICc(l_model)
+  
+  s_correl <- pgirmess::correlog(coords=dataset_use[names(residuals(s_model)),1:2], 
+                                 z=residuals(s_model), method="Moran")
+  s_correl <- data.frame(s_correl)
+  
+  l_correl <- pgirmess::correlog(coords=dataset_use[names(residuals(l_model)),1:2], 
+                                 z=residuals(l_model), method="Moran")
+  l_correl <- data.frame(l_correl)
+  
+  return(list(s_model, l_model,
+              s_correl, l_correl))
+  
+}
+# stop the cluster
+stopCluster(cl)
+end_time <- Sys.time()
+
+time_models <- end_time - start_time
+
+
+
+
+# Current diversity
+FD.sar = errorsarlm(FD_cc~PD_cc, listw=nlw, data= dataset)
+AICc(FD.sar)
+#AIC SAR: 2208.157
+summary(lm(FDall ~ poly(PDall, 2, raw=TRUE),data=spatialdata))
+#polynomial model explains 47%
+AICc(lm(FDall ~ poly(PDall, 2, raw=TRUE),data=spatialdata))
+#AIC: 3327.133
+summary(lm(FDall~PDall,data=spatialdata))
+AICc(lm(FDall~PDall,data=spatialdata))
+#AIC: 5722.374
+
+#######################
+# S1
+FDS1.sar = errorsarlm(FDlossS1~PDlossS1, listw=nlw, data= spatialdata)
+FDS1.sar.moran <- moran.test(resid(FDS1.sar), listw=nlw, alternative="greater")
+# S2
+FDS2.sar = errorsarlm(FDlossS2~PDlossS2, listw=nlw, data= spatialdata)
+FDS2.sar.moran <- moran.test(resid(FDS2.sar), listw=nlw, alternative="greater")
+#######################
+
+##############################################
+# Non-spatial models
+##############################################
+
+#######################
+# S1
+FDS1.lm = lm(FDlossS1~PDlossS1, data= spatialdata)
+FDS1.lm.moran <- moran.test(resid(FDS1.lm), listw=nlw, alternative="greater")
+# S2
+FDS2.lm = lm(FDlossS2~PDlossS2, data= spatialdata)
+FDS2.lm.moran <- moran.test(resid(FDS2.lm), listw=nlw, alternative="greater")
+
+#######################
+#Correlograms
+
+# sar
+FDS1.cor.sar.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS1.sar), increment=10, resamp=0, latlon = T)
+FDS2.cor.sar.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS2.sar), increment=10, resamp=0, latlon = T)
+# OLS
+FDS1.cor.lm.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS1.lm), increment=10, resamp=0, latlon = T)
+FDS2.cor.lm.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS2.lm), increment=10, resamp=0, latlon = T)
+
+#######################
+# Plot for raw data
+#pdf(paste("Correlograms.pdf",sep=""),width=10,height=5,useDingbats=F)
+par(mar=c(5,5,2,0.1), mfrow=c(1,2))
+# first S1 residuals
+plot(FDS1.cor.sar.res$correlation[1:20], type="b", pch=1, cex=1.5, lwd=1.5, ylim=c(0,1.6),
+     xlab="Distance class", ylab="Moran's I", cex.lab=1.5, cex.axis=1.5)
+abline(h=0, lwd=2, lty=2)
+# then SARerr model residuals
+points(FDS1.cor.lm.res$correlation[1:20], pch=4, cex=1.2)
+lines(FDS1.cor.lm.res$correlation[1:20], lwd=1.5)
+
+# Then S2 residuals
+plot(FDS2.cor.sar.res$correlation[1:20], type="b", pch=1, cex=1.5, lwd=1.5, ylim=c(0,1.6),
+     xlab="Distance class", ylab="", cex.lab=1.5, cex.axis=1.5)
+abline(h=0, lwd=2, lty=2)
+# then SARerr model residuals
+points(FDS2.cor.lm.res$correlation[1:20], pch=4, cex=1.2)
+lines(FDS2.cor.lm.res$correlation[1:20], lwd=1.5)
+# annotate
+legend(x=5, y=1.55, legend=c("Residuals OLS"), pch=c(4), bty="n", cex=1.2)
+# Annotate
+legend(x=5, y=1.44, legend=c("Residuals SARerror"), pch=c(1), bty="n", cex=1.2)
+#dev.off()
+
+
+#######################
+# get R2 from models
+#S1 sar:
+summary.sarlm(FDS1.sar, Nagelkerke=T)
+summary(FDS1.lm)
+AICcmodavg::AICc(FDS1.lm)
+
+# R-full
+cor(x = data.frame(predict.sarlm(FDS1.sar))$fit, y = scale(FDlossS1), method = "pearson")^2
+# R env
+cor(x = data.frame(predict.sarlm(FDS1.sar))$trend, y = scale(FDlossS1), method = "pearson")^2
+
+#S2 sar:
+summary.sarlm(FDS2.sar, Nagelkerke=T)
+summary(FDS2.lm)
+AICcmodavg::AICc(FDS2.lm)
+```
+
+## Test using SES data
+Is PD-loss a good predictor of FD-loss?
+```{r eval = F}
+spatialdata <- scale(data.frame(FDall, PDall))
+spatialdata <- na.omit(data.frame(XY, spatialdata, 
+                                  PDlossS1=PDS1.loss.ses,FDlossS1=FDS1.loss.ses,
+                                  PDlossS2=PDS2.loss.ses,FDlossS2=FDS2.loss.ses,
+                                  Realm))
+
+
+#Make a matrix of coordinates (X and Y coordinates)
+coords<-as.matrix(spatialdata[,1:2])
+
+#######################
+#Define neighbourhood
+k1 <- knn2nb(knearneigh(coords))
+all.linked <- max(unlist(nbdists(k1, coords)))
+nb1.5<-dnearneigh(coords,0,all.linked)
+#Spatial weights, illustrated with coding style "W" (row standardized)
+nlw<-nb2listw(nb1.5, glist=NULL, style="W", zero.policy=FALSE)
+
+#######################
+#Define neighbourhood
+k <- knn2nb(knearneigh(coords, k=4, RANN = F))
+#Spatial weights, illustrated with coding style "W" (row standardized)
+nlw2<-nb2listw(k, style="W", zero.policy=T)
+#######################
+
+##############################################
+# Spatial models
+##############################################
+
+#######################
+# Current diversity
+FD.sar = errorsarlm(FDall~PDall, listw=nlw, data= spatialdata)
+AICc(FD.sar)
+#AIC SAR: 2208.157
+summary(lm(FDall ~ poly(PDall, 2, raw=TRUE),data=spatialdata))
+#polynomial model explains 47%
+AICc(lm(FDall ~ poly(PDall, 2, raw=TRUE),data=spatialdata))
+#AIC: 3327.133
+summary(lm(FDall~PDall,data=spatialdata))
+AICc(lm(FDall~PDall,data=spatialdata))
+#AIC: 5722.374
+
+#######################
+# S1
+FDS1.sar = errorsarlm(FDlossS1~PDlossS1, listw=nlw, data= spatialdata)
+FDS1.sar.moran <- moran.test(resid(FDS1.sar), listw=nlw, alternative="greater")
+
+# S2
+FDS2.sar = errorsarlm(FDlossS2~PDlossS2, listw=nlw, data= spatialdata)
+FDS2.sar.moran <- moran.test(resid(FDS2.sar), listw=nlw, alternative="greater")
+#######################
+
+##############################################
+# Non-spatial models
+##############################################
+
+#######################
+# S1
+FDS1.lm = lm(FDlossS1~PDlossS1, data= spatialdata)
+FDS1.lm.moran <- moran.test(resid(FDS1.lm), listw=nlw, alternative="greater")
+
+# S2
+FDS2.lm = lm(FDlossS2~PDlossS2, data= spatialdata)
+FDS2.lm.moran <- moran.test(resid(FDS2.lm), listw=nlw, alternative="greater")
+
+#######################
+#Correlograms
+
+# sar
+FDS1.cor.sar.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS1.sar), increment=10, resamp=0, latlon = T)
+FDS2.cor.sar.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS2.sar), increment=10, resamp=0, latlon = T)
+# OLS
+FDS1.cor.lm.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS1.lm), increment=10, resamp=0, latlon = T)
+FDS2.cor.lm.res<-correlog(spatialdata[,1],spatialdata[,2], z=residuals(FDS2.lm), increment=10, resamp=0, latlon = T)
+
+#######################
+# Plot for raw data
+pdf(paste("Correlograms_SES.pdf",sep=""),width=10,height=5,useDingbats=F)
+par(mar=c(5,5,2,0.1), mfrow=c(1,2))
+# first S1 residuals
+distances <- seq(0,1000,50)
+
+plot(FDS1.cor.sar.res$correlation[distances], type="b", pch=1, cex=1.5, lwd=1.5, ylim=c(-0.3,1),
+     xlab="Distance class", ylab="Moran's I", cex.lab=1.5, cex.axis=1.5)
+abline(h=0, lwd=2, lty=2)
+# then SARerr model residuals
+points(FDS1.cor.lm.res$correlation[distances], pch=4, cex=1.2)
+lines(FDS1.cor.lm.res$correlation[distances], lwd=1.5)
+
+# Then S2 residuals
+plot(FDS2.cor.sar.res$correlation[distances], type="b", pch=1, cex=1.5, lwd=1.5, ylim=c(-0.3,1),
+     xlab="Distance class", ylab="", cex.lab=1.5, cex.axis=1.5)
+abline(h=0, lwd=2, lty=2)
+# then SARerr model residuals
+points(FDS2.cor.lm.res$correlation[distances], pch=4, cex=1.2)
+lines(FDS2.cor.lm.res$correlation[distances], lwd=1.5)
+# annotate
+legend(x=8, y=1, legend=c("Residuals OLS"), pch=c(4), bty="n", cex=1.2)
+# Annotate
+legend(x=8, y=.9, legend=c("Residuals SARerror"), pch=c(1), bty="n", cex=1.2)
+dev.off()
+
+#######################
+# get R2 from models
+#S1 sar:
+summary.sarlm(FDS1.sar, Nagelkerke=T)
+summary(FDS1.lm)
+AICcmodavg::AICc(FDS1.lm)
+
+# R-full
+cor(x = data.frame(predict.sarlm(FDS1.sar))$fit, y = scale(FDlossS1), method = "pearson")^2
+# R env
+cor(x = data.frame(predict.sarlm(FDS1.sar))$trend, y = scale(FDlossS1), method = "pearson")^2
+
+#S2 sar:
+summary.sarlm(FDS2.sar, Nagelkerke=T)
+summary(FDS2.lm)
+AICcmodavg::AICc(FDS2.lm)
+```
+
+
+
+# 5. Plots
+## Correlation PD and FD
+```{r}
+
+########################
+# PD vs FD
+dataplot <- data.frame(PD_cc = dataset$PD_cc,
+                       FD_cc = dataset$FD_cc,
+                       Realm)
+
+dataplot <- na.omit(dataplot)
+
+# polynomial model
+AICc(lm(FD_cc~poly(PD_cc,2),dataplot))
+# linear model
+AICc(lm(FD_cc~PD_cc,dataset))
+anova(lm(FD_cc~poly(PD_cc,2),dataplot), lm(FD_cc~FD_cc,dataplot))
+
+# scaleFUN <- function(x) sprintf("%.2f", x)
+
+pdfd <- ggplot(dataset, aes(PD_cc,FD_cc*100))+
+  geom_point(aes(colour=factor(Realm), fill = factor(Realm), shape = factor(Realm)),
+             size=2) + 
+  scale_colour_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC","gray"))+
+  scale_fill_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC", "gray"))+
+  scale_shape_manual(values=c(21,22,21,22,21,22,21,22,21,22,21,22))+
+  theme_classic()+
+  theme(text = element_text(colour="black", size = 26),legend.title = element_blank(),  aspect.ratio=1) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red", se = T)+
+  # geom_smooth(method = "lm", formula = y ~ x, color = "red", se = T)+
+  labs(x = "Phylogenetic diversity (Myr)", 
+       y = bquote("Functional diversity "~(SD^3)))
+
+########################
+# PD loss vs FD loss
+
+dataplot <- data.frame(PD_closs = dataset$PD_closs, 
+                       FD_closs = dataset$FD_closs, 
+                       Realm)
+
+dataplot <- na.omit(dataplot)
+
+# polynomial model
+AICc(lm(FD_closs~poly(PD_closs,2),dataplot))
+summary(lm(FD_closs~poly(PD_closs,2),dataplot))
+
+# linear model
+AICc(lm(FD_closs~PD_closs,dataset))
+summary(lm(FD_closs~PD_closs,dataset))
+
+anova(lm(FD_closs~poly(PD_closs,2),dataplot), lm(FD_closs~FD_closs,dataplot))
+
+# scaleFUN <- function(x) sprintf("%.2f", x)
+
+data_melt <- data.frame("PD"=melt(PD_closs_),
+                        "FD"=melt(FD_closs_))
+
+pdfd_loss <- ggplot(dataset[-which(SPD_closs==0),], aes(PD_closs,FD_closs*100))+ 
+  geom_point(aes(colour=factor(Realm), fill = factor(Realm), shape = factor(Realm)),
+             size=2) + 
+  scale_colour_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC","gray"))+
+  scale_fill_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC", "gray"))+
+  scale_shape_manual(values=c(21,22,21,22,21,22,21,22,21,22,21,22))+
+  theme_classic()+
+  theme(text = element_text(colour="black", size = 26),legend.title = element_blank(),  aspect.ratio=1) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  # geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red", se = T)+
+  geom_smooth(data = data_melt, aes(PD.value,FD.value*100,group=FD.X2), alpha = .05,
+              method = "lm", formula = y ~ x, color = alpha("red",.05), se = F)+
+  # geom_smooth(method = "lm", color = "red", se = T)+
+  ylim(c(min(FD_closs*100, na.rm = T),max(FD_closs*100, na.rm = T)))+ 
+  xlim(c(min(PD_closs, na.rm = T),max(PD_closs, na.rm = T)))+
+  labs(x = "Phylogenetic diversity loss (Myr)", 
+       y = bquote("Functional diversity loss "~(SD^3)))
+
+########################
+# PDses vs FDses
+
+dataplot <- na.omit(data.frame(PD_cc_ses,FD_cc_ses,Realm))
+
+# polynomial model
+AICc(lm(FD_cc_ses~poly(PD_cc_ses,2),dataplot))
+# linear model
+AICc(lm(FD_cc_ses~PD_cc_ses,dataset))
+anova(lm(FD_cc_ses~poly(PD_cc_ses,2),dataplot), lm(FD_cc_ses~PD_cc_ses,dataplot))
+
+
+pdfd_ses<-ggplot(dataset, aes(PD_cc_ses,FD_cc_ses))+
+  geom_point(aes(colour=factor(Realm), fill = factor(Realm), shape = factor(Realm)),
+             size=2) + 
+  scale_colour_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC","gray"))+
+  scale_fill_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC", "gray"))+
+  scale_shape_manual(values=c(21,22,21,22,21,22,21,22,21,22,21,22))+
+  theme_classic()+
+  # scale_y_continuous(labels=scaleFUN) +
+  theme(text = element_text(colour="black", size = 26),legend.title = element_blank(),  aspect.ratio=1) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red", se = T)+
+  # geom_smooth(method = "lm", formula = y ~ x, color = "red", se = T)+
+  ylim(c(min(FD_cc_ses, na.rm = T),max(FD_cc_ses, na.rm = T)))+ 
+  xlim(c(min(PD_cc_ses, na.rm = T),max(PD_cc_ses, na.rm = T)))+
+  labs(x = "Phylogenetic diversity (SES)", 
+       y = "Functional diversity (SES)")
+
+########################
+# PDses loss vs FDses loss
+
+dataplot <- data.frame(PD_closs = dataset$PD_closs_ses,
+                       FD_closs = dataset$FD_closs_ses,
+                       Realm)
+
+dataplot <- na.omit(dataplot)
+
+# polynomial model
+AICc(lm(FD_closs~poly(PD_closs,2),dataplot))
+summary(lm(FD_closs~poly(PD_closs,2),dataplot))
+
+# linear model
+AICc(lm(FD_closs~PD_closs,dataplot))
+summary(lm(FD_closs~PD_closs,dataset))
+
+anova(lm(FD_closs~poly(PD_closs,2),dataplot), lm(FD_closs~FD_closs,dataplot))
+
+# scaleFUN <- function(x) sprintf("%.2f", x)
+
+
+data_melt <- data.frame("PD"=melt(PD_closs_ses_),
+                        "FD"=melt(FD_closs_ses_))
+
+pdfd_ses_loss <- ggplot(dataplot, aes(PD_closs,FD_closs))+ 
+  geom_point(aes(colour=factor(Realm), fill = factor(Realm), shape = factor(Realm)),
+             size=2) + 
+  scale_colour_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC","gray"))+
+  scale_fill_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC", "gray"))+
+  scale_shape_manual(values=c(21,22,21,22,21,22,21,22,21,22,21,22))+
+  theme_classic()+
+  theme(text = element_text(colour="black", size = 26),legend.title = element_blank(),  aspect.ratio=1) +
+  guides(colour = guide_legend(override.aes = list(size=4))) +
+  # geom_smooth(method = "lm", formula = y ~ poly(x, 2), color = "red", se = T)+
+  geom_smooth(data = data_melt, aes(PD.value,FD.value,group=FD.X2), alpha = .05,
+              method = "lm", formula = y ~ x, color = alpha("red",.05), se = F)+
+  # geom_smooth(method = "lm", color = "red", se = T)+
+  ylim(c(min(dataplot$FD_closs, na.rm = T),max(dataplot$FD_closs, na.rm = T)))+
+  xlim(c(min(dataplot$PD_closs, na.rm = T),max(dataplot$PD_closs, na.rm = T)))+
+  labs(x = "Phylogenetic diversity loss (SES)", 
+       y = "Functional diversity loss (SES)")
+
+
+pdf(paste("Figs/Fig2_PDxFD.pdf",sep=""),width=9,height=36,useDingbats=F)
+plot_grid(pdfd, pdfd_ses, pdfd_loss, pdfd_ses_loss,
+          labels = c('(a)', '(b)', '(c)', '(d)'), 
+          align = 'v',
+          nrow = 4)
+dev.off()
+
+```
+
+
+## Realms
+```{r}
+
+dataplot <- na.omit(data.frame(XY,
+                               # SPD_closs = get_quant(dataset$SPD_closs),
+                               PD_closs = dataset$PD_closs_ses,
+                               FD_closs = dataset$FD_closs_ses,
+                               Realm = dataset$Realm))
+
+dataplot$diff <-  get_quant(dataplot$FD_closs,100)/10 - get_quant(dataplot$PD_closs,100)/10
+
+tgc <- ddply(dataplot, "Realm", summarise,
+               N    = length(diff),
+               median = median(diff), # median value
+               sd   = sd(diff), # standard deviation
+               se   = sd / sqrt(N), # standard error
+              ci = se * qt(.95/2 + .5, N-1) # confidence interval 95%
+)
+
+pdf(paste("Figs/Fig1_realms.pdf",sep=""),width=5,height=2,useDingbats=F)
+ggplot(tgc, aes(x=Realm, y=median, color=Realm))+
+  geom_hline(yintercept=0,linetype = "dashed") +
+  geom_point(position=position_dodge(.9), size=3) +
+  # geom_point(data=dataplot, aes(x=Realm, y=diff, color=Realm, fill=Realm), position=position_dodge(0.9), size=1,alpha=.05) +
+  geom_errorbar(position=position_dodge(.9), size= .5, width=0, aes(ymin=median-ci, ymax=median+ci)) +
+  theme_bw()+
+  theme(legend.position="none") +
+  coord_flip() +
+  # ylim(-6, 6) + 
+  scale_color_manual(values=c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC", "gray")) +
+  scale_x_discrete(limits=sort(unique(tgc$Realm), decreasing = T)) +
+  labs(x = "", y = "") # XY Labels
+dev.off()
+
+
+### Difference loss
+max_abolute_PD <- max(abs(c(na.omit(dataplot$diff))))
+brk1 <- round(func_splint(c(-max_abolute_PD,0),3),1)
+brk2 <- round(func_splint(c(0,max_abolute_PD),3),1)
+PD_brk <- unique(sort(c(brk1,brk2)))
+
+pdf("Figs/Fig2_Diff_Loss.pdf", width = 10, height = 10/3)
+
+SR <- cbind(dataplot[,1:2],Var=dataplot$diff)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(land, col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=PD_brk,
+                    labels=PD_brk), 
+     zlim=round(c(-max_abolute_PD,max_abolute_PD),1),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+
+dev.off()
+
+#### Bivariate maps
+#function to generate bivariate maps. Copy and paste that into R:
+bivariate.map<-function(rasterx, rastery, colormatrix=col.matrix, nquantiles=10){
+  quanmean<-getValues(rasterx)
+  temp <- data.frame(quanmean, quantile=rep(NA, length(quanmean)))
+  brks <- with(temp, quantile(temp,na.rm=TRUE, probs = c(seq(0,1,1/nquantiles))))
+  r1 <- within(temp, quantile <- cut(quanmean, breaks = brks, labels = 2:length(brks),include.lowest = TRUE))
+  quantr<-data.frame(r1[,2]) 
+  quanvar<-getValues(rastery)
+  temp <- data.frame(quanvar, quantile=rep(NA, length(quanvar)))
+  brks <- with(temp, quantile(temp,na.rm=TRUE, probs = c(seq(0,1,1/nquantiles))))
+  r2 <- within(temp, quantile <- cut(quanvar, breaks = brks, labels = 2:length(brks),include.lowest = TRUE))
+  quantr2<-data.frame(r2[,2])
+  as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+  col.matrix2<-colormatrix
+  cn<-unique(colormatrix)
+  for(i in 1:length(col.matrix2)){
+    ifelse(is.na(col.matrix2[i]),col.matrix2[i]<-1,col.matrix2[i]<-which(col.matrix2[i]==cn)[1])}
+  cols<-numeric(length(quantr[,1]))
+  for(i in 1:length(quantr[,1])){
+    a<-as.numeric.factor(quantr[i,1])
+    b<-as.numeric.factor(quantr2[i,1])
+    cols[i]<-as.numeric(col.matrix2[b,a])}
+  r<-rasterx
+  r[1:length(r)]<-cols
+  return(r)}
+
+colmat<-function(nquantiles=10, upperleft=rgb(0,150,235, maxColorValue=255), upperright=rgb(130,0,80, maxColorValue=255), bottomleft="grey", bottomright=rgb(255,230,15, maxColorValue=255), xlab="x label", ylab="y label"){
+  my.data<-seq(0,1,.01)
+  my.class<-classIntervals(my.data,n=nquantiles,style="quantile")
+  my.pal.1<-findColours(my.class,c(upperleft,bottomleft))
+  my.pal.2<-findColours(my.class,c(upperright, bottomright))
+  col.matrix<-matrix(nrow = 101, ncol = 101, NA)
+  for(i in 1:101){
+    my.col<-c(paste(my.pal.1[i]),paste(my.pal.2[i]))
+    col.matrix[102-i,]<-findColours(my.class,my.col)}
+  plot(c(1,1),pch=19,col=my.pal.1, cex=0.5,xlim=c(0,1),ylim=c(0,1),frame.plot=F, xlab=xlab, ylab=ylab,cex.lab=1.3)
+  for(i in 1:101){
+    col.temp<-col.matrix[i-1,]
+    points(my.data,rep((i-1)/100,101),pch=15,col=col.temp, cex=1)}
+  seqs<-seq(0,100,(100/nquantiles))
+  seqs[1]<-1
+  col.matrix <- col.matrix[c(seqs), c(seqs)]}
+
+
+# You can specify the number of quantiles, colors and labels of your color matrix. Example:
+
+
+pdf("Figs/col_legend.pdf",3.5,4)
+col.matrix <- colmat(nquantiles=10, upperleft="red", upperright="yellow", bottomleft="green", bottomright="blue", xlab="PD-loss", ylab="FD-loss")
+dev.off()
+
+
+
+# But let's use this simple code. You can change "nquantiles" to generate color matrices with different color schemes. For example, change it to 4 to produce a 4x4 color scheme.
+
+#col.matrix <- colmat(nquantiles=30)
+
+# PD-loss
+PD_raster <- cbind(dataplot[,1:2],Var=dataplot$PD_closs)
+coordinates(PD_raster)<-~x+y
+gridded(PD_raster) <- TRUE
+PD_raster <- raster(PD_raster)
+
+# FD-loss
+FD_raster <- cbind(dataplot[,1:2],Var=dataplot$FD_closs)
+coordinates(FD_raster)<-~x+y
+gridded(FD_raster) <- TRUE
+FD_raster <- raster(FD_raster)
+
+bivmap<-bivariate.map(PD_raster,FD_raster, colormatrix=col.matrix, nquantiles=10)
+
+pdf("Figs/Fig2_Bivar_Loss.pdf", width = 10, height = 10/3)
+plot(land, col="gray",border="gray")
+plot(bivmap,frame.plot=F,axes=F,box=F,add=T,legend=F,col=as.vector(col.matrix))
+plot(mundi, axes = F, add=T)
+dev.off()
+
+## realm plot
+realm_raster <- cbind(data.frame(XY),Var=Realm)
+coordinates(realm_raster)<-~x+y
+gridded(realm_raster) <- TRUE
+realm_raster <- raster(realm_raster)
+
+pdf("Figs/Fig2_realm_legend.pdf", width = 10, height = 10/3)
+plot(land, col="white",border="white")
+plot(realm_raster,add=T,axes=F,box=F, 
+     col=colorRampPalette(c("#F8766D","#D89000","#A3A500","#39B600","#00BF7D","#00BFC4","#00B0F6","#9590FF","#E76BF3", "#FF62BC", "gray"))(11))
+plot(mundi, axes = F, add=T)
+dev.off()
+```
+
+
+  
+*** 
+
+\newpage
+
+##Figure. Actual vs future diversity pattern.    
+```{r echo=F, results="hide"}
+# X11(width = 10, height = 5)
+pdf("Figs/Fig2_CurrentvsLoss.pdf", width = 10, height = 5)
+
+layout(matrix(c(1:6), ncol = 2, byrow = T))
+par(mar=c(1,0,1,1))
+
+rampa <- colorRampPalette(c('cornflowerblue','yellow','red'))(10)
+
+# Get class intervals SPD
+SR_classint <- BAMMtools::getJenksBreaks(SPD_cc, 10)
+# avoid identical breaks
+SR_classint <- unique(SR_classint)
+# Get class intervals PD
+PD_classint <- BAMMtools::getJenksBreaks(round(PD_cc,0), 10)
+# avoid identical breaks
+PD_classint <- unique(PD_classint)
+PD_classint[1] <- min(round(PD_cc,0),na.rm = T)
+PD_classint[10] <- max(round(PD_cc,0),na.rm = T)
+# Get class intervals FD
+FD_classint <- BAMMtools::getJenksBreaks(FD_cc*100, 10)
+# avoid identical breaks
+FD_classint <- unique(FD_classint)
+FD_classint[1] <- min(FD_cc*100,na.rm = T)
+FD_classint[10] <- max(FD_cc*100,na.rm = T)
+FD_classint <- round(FD_classint,2)
+
+max_abolute_PD <- max(abs(c(na.omit(dataset$PD_closs_ses[which(dataset$SPD_closs>=1)]))))
+brk1 <- round(func_splint(c(-max_abolute_PD,0),3),1)
+brk2 <- round(func_splint(c(0,max_abolute_PD),3),1)
+PD_brk <- unique(sort(c(brk1,brk2)))
+
+max_abolute_FD <- max(abs(c(na.omit(dataset$FD_closs_ses[which(dataset$SPD_closs>=1)]))))
+brk1 <- round(func_splint(c(-max_abolute_FD,0),3),1)
+brk2 <- round(func_splint(c(0,max_abolute_FD),3),1)
+FD_brk <- unique(sort(c(brk1,brk2)))
+
+# richness
+SR <- cbind(data.frame(XY),Var=SPD_cc)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Species richness',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,main='Species richness',axes=F,box=F,
+     axis.args=list(at=round(func_splint(SPD_cc,5),0),
+                    labels=round(func_splint(SPD_cc,5),0)), 
+     breaks = SR_classint, col=rampa)
+plot(mundi, axes = F, add=T)
+
+# richness-loss
+SR <- cbind(data.frame(XY),Var=apply(SPD_closs.p,1,mean))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Species richness loss (%)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F,
+     axis.args=list(at=c(0,25,50,75,100), labels=c(0,25,50,75,100)), 
+     breaks = c(0,1,2.5,5,10,20,25,50,75,100), col=rampa)
+plot(mundi, axes = F, add=T)
+
+# PD
+SR <- cbind(data.frame(XY),Var=round(PD_cc,0))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Phylogenetic diversity (Myr)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=round(func_splint(PD_cc,5),0),
+                    labels=round(func_splint(PD_cc,5),0)), 
+     breaks = PD_classint, col=rampa)
+plot(mundi, axes = F, add=T)
+
+# PD-loss
+SR <- cbind(data.frame(XY),Var=apply(PD_closs.p,1,mean))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Phylogenetic diversity loss (%)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F,
+     axis.args=list(at=c(0,25,50,75,100), labels=c(0,25,50,75,100)), 
+     breaks = c(0,1,2.5,5,10,20,25,50,75,100), col=rampa)
+plot(mundi, axes = F, add=T)
+
+# FD
+SR <- cbind(data.frame(XY),Var=round(FD_cc*100,2))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main=bquote(bold("Functional diversity"~(SD^3))),axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=round(func_splint(FD_cc*100,5),2),
+                    labels=round(func_splint(FD_cc*100,5),2)), 
+     breaks = FD_classint, col=rampa)
+plot(mundi, axes = F, add=T)
+
+# FD-loss
+SR <- cbind(data.frame(XY),Var=apply(FD_closs.p,1,mean))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Functional diversity loss (%)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F,
+     axis.args=list(at=c(0,25,50,75,100), labels=c(0,25,50,75,100)), 
+     breaks = c(0,1,2.5,5,10,20,25,50,75,100), col=rampa)
+plot(mundi, axes = F, add=T)
+
+dev.off()
+```
+
+##Figure. Loss SES
+```{r echo=F, results="hide"}
+# Get class intervals PD
+PD_classint <- BAMMtools::getJenksBreaks(round(dataset$PD_closs,0), 10)
+# avoid identical breaks
+PD_classint <- unique(PD_classint)
+PD_classint[1] <- min(round(dataset$PD_closs,0),na.rm = T)
+PD_classint[10] <- max(round(dataset$PD_closs,0),na.rm = T)
+# Get class intervals FD
+FD_classint <- BAMMtools::getJenksBreaks(dataset$FD_closs*100, 10)
+# avoid identical breaks
+FD_classint <- unique(FD_classint)
+FD_classint[1] <- min(dataset$FD_closs*100,na.rm = T)
+FD_classint[10] <- max(dataset$FD_closs*100,na.rm = T)
+FD_classint <- round(FD_classint,3)
+
+max_abolute_PD <- max(abs(c(na.omit(dataset$PD_closs_ses[which(dataset$SPD_closs>=1)]))))
+brk1 <- round(func_splint(c(-max_abolute_PD,0),3),1)
+brk2 <- round(func_splint(c(0,max_abolute_PD),3),1)
+PD_brk <- unique(sort(c(brk1,brk2)))
+
+max_abolute_FD <- max(abs(c(na.omit(dataset$FD_closs_ses[which(dataset$SPD_closs>=1)]))))
+brk1 <- round(func_splint(c(-max_abolute_FD,0),3),1)
+brk2 <- round(func_splint(c(0,max_abolute_FD),3),1)
+FD_brk <- unique(sort(c(brk1,brk2)))
+
+# X11(width = 10, height = 5)
+pdf("Figs/Fig2_Loss_SES.pdf", width = 10, height = 3.3333)
+
+layout(matrix(c(1:4), ncol = 2, byrow = T))
+par(mar=c(1,0,1,1))
+
+# PD-loss
+SR <- cbind(data.frame(XY),Var=dataset$PD_closs)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Phylogenetic diversity loss (Myr)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=round(func_splint(dataset$PD_closs,5),0),
+                    labels=round(func_splint(dataset$PD_closs,5),0)), 
+     breaks = PD_classint, col=rampa)
+plot(mundi, axes = F, add=T)
+
+# PD-loss SES
+SR <- cbind(data.frame(XY),Var=unlist(lapply(1:NCell, 
+                                             function(x) 
+                                               mean(PD_closs_ses[x,][which(SPD_closs[x,]>=1)], na.rm = T))))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='Phylogenetic diversity loss (SES)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=PD_brk,
+                    labels=PD_brk), 
+     zlim=round(c(-max_abolute_PD,max_abolute_PD),1),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+
+# FD-loss
+SR <- cbind(data.frame(XY),Var=dataset$FD_closs*100)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main=bquote(bold("Functional diversity loss"~(SD^3))),axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=round(func_splint(dataset$FD_closs*100,5),3),
+                    labels=round(func_splint(dataset$FD_closs*100,5),3)), 
+     breaks = FD_classint, col=rampa)
+plot(mundi, axes = F, add=T)
+
+# FD-loss SES
+SR <- cbind(data.frame(XY),Var=unlist(lapply(1:NCell, 
+                                             function(x) 
+                                               mean(FD_closs_ses[x,][which(SPD_closs[x,]>=1)], na.rm = T))))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='Functional diversity loss (SES)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR,add=T,axes=F,box=F, 
+     axis.args=list(at=FD_brk,
+                    labels=FD_brk), 
+     zlim=round(c(-max_abolute_FD,max_abolute_FD),1),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+
+dev.off()
+```
+
+
+##Figure. SD future diversity pattern.    
+```{r echo=F, results="hide"}
+# X11(width = 10, height = 5)
+pdf("Figs/Supp_Fig2_SD_Loss.pdf", width = 5, height = 3.7)
+
+layout(matrix(c(1:3), ncol = 1, byrow = T))
+par(mar=c(1,0,1,1))
+
+rampa <- colorRampPalette(c('cornflowerblue','yellow','red'))(10)
+
+# SD richness-loss
+SR <- cbind(data.frame(XY),Var=apply(SPD_closs,1,sd))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(land,main='Species richness loss (SD)', col="gray",border="gray")
+plot(SR,axes=F,box=F, col=rampa,add=T)
+plot(mundi, axes = F, add=T)
+
+# SD PD-loss
+SR <- cbind(data.frame(XY),Var=apply(PD_closs,1,sd))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(land,main='Phylogenetyc diversity loss (SD)', col="gray",border="gray")
+plot(SR,axes=F,box=F, col=rampa,add=T)
+plot(mundi, axes = F, add=T)
+
+# SD FD-loss
+SR <- cbind(data.frame(XY),Var=apply(FD_closs,1,sd)*100)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(land,main='Functional diversity loss (SD)', col="gray",border="gray")
+plot(SR,axes=F,box=F, col=rampa,add=T)
+plot(mundi, axes = F, add=T)
+
+dev.off()
+```
+*** 
+
+\newpage
+
+
+
+##Figure. Assemblages that will loss all species
+```{r}
+pdf("60_percent_loss.pdf", width = 5, height = 5/3, useDingbats=F)
+par(mar=c(2,0,1,0))
+
+# % richness loss
+SR <- cbind(data.frame(XY),Var=SPD_closs.p)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR>60, main='Optimistic scenario',col=c('white','red'), axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T, lwd=.1)
+
+dev.off()
+```
+
+##Figure. High/Low PD/FD-loss
+```{r}
+pdf("High_low_loss.pdf", width = 11, height = 5, useDingbats=F)
+layout(matrix(c(1:4),2,2, byrow = F))
+par(mar=c(0,0,2,0))
+
+# High/Low PD-loss
+more <- 1.96
+less <- -1.96
+PDlossS1HL <- rep(2,length(PDS1.loss.ses))
+PDlossS1HL[which(PDS1.loss.ses>more)] <- 3
+PDlossS1HL[which(PDS1.loss.ses<less)] <- 1
+
+SR <- cbind(data.frame(XY),Var=PDlossS1HL)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='Optimistic scenario\nPD-loss',col=c('white','red'), axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T, lwd=.1)
+
+# High/Low FD-loss
+more <- 1.96
+less <- -1.96
+FDlossS1HL <- rep(2,length(FDS1.loss.ses))
+FDlossS1HL[which(FDS1.loss.ses>more)] <- 3
+FDlossS1HL[which(FDS1.loss.ses<less)] <- 1
+
+SR <- cbind(data.frame(XY),Var=FDlossS1HL)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='Optimistic scenario\nFD-loss',col=c("blue",'white','red'), axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T, lwd=.1)
+
+# High/Low PD-loss
+more <- 1.96
+less <- -1.96
+PDlossS2HL <- rep(2,length(PDS2.loss.ses))
+PDlossS2HL[which(PDS2.loss.ses>more)] <- 3
+PDlossS2HL[which(PDS2.loss.ses<less)] <- 1
+
+SR <- cbind(data.frame(XY),Var=PDlossS2HL)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='Pessimistic scenario\nPD-loss',col=c("blue",'white','red'), axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T, lwd=.1)
+
+# High/Low FD-loss
+more <- 1.96
+less <- -1.96
+FDlossS2HL <- rep(2,length(FDS2.loss.ses))
+FDlossS2HL[which(FDS2.loss.ses>more)] <- 3
+FDlossS2HL[which(FDS2.loss.ses<less)] <- 1
+
+SR <- cbind(data.frame(XY),Var=FDlossS2HL)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='Pessimistic scenario\nFD-loss',col=c("blue",'white','red'), axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T, lwd=.1)
+
+dev.off()
+```
+
+## loss vs rich
+```{r echo=F, results="hide"}
+plot(SPDall, PDS1.loss.ses) ; summary(lm(PDS1.loss.ses~SPDall))
+plot(log(SPDall), PDS1.loss.ses) ; summary(lm(PDS1.loss.ses~log(SPDall)))
+plot(splossS1, PDS1.loss.ses) ; summary(lm(PDS1.loss.ses~splossS1))
+plot(log(splossS1), PDS1.loss.ses) ; summary(lm(PDS1.loss.ses~log(splossS1)))
+
+remfd <- which(is.na(FDS1.loss.ses))
+remfd <- c(remfd,which(is.infinite(FDS1.loss.ses)))
+
+plot(SPDall, FDS1.loss.ses) ; summary(lm(FDS1.loss.ses[-remfd]~SPDall[-remfd]))
+plot(log(SPDall), FDS1.loss.ses) ; summary(lm(FDS1.loss.ses[-remfd]~log(SPDall[-remfd])))
+plot(splossS1, FDS1.loss.ses) ; summary(lm(FDS1.loss.ses[-remfd]~splossS1[-remfd]))
+plot(log(splossS1), FDS1.loss.ses) ; summary(lm(FDS1.loss.ses[-remfd]~log(splossS1[-remfd])))
+
+plot(SPDall, PDS2.loss.ses) ; summary(lm(PDS2.loss.ses~SPDall))
+plot(log(SPDall), PDS2.loss.ses) ; summary(lm(PDS2.loss.ses~log(SPDall)))
+plot(splossS2, PDS2.loss.ses) ; summary(lm(PDS2.loss.ses~splossS2))
+plot(log(splossS2), PDS2.loss.ses) ; summary(lm(PDS2.loss.ses~log(splossS2)))
+
+remfd <- which(is.na(FDS2.loss.ses))
+remfd <- c(remfd,which(is.infinite(FDS2.loss.ses)))
+
+plot(SPDall, FDS2.loss.ses) ; summary(lm(FDS2.loss.ses[-remfd]~SPDall[-remfd]))
+plot(log(SPDall), FDS2.loss.ses) ; summary(lm(FDS2.loss.ses[-remfd]~log(SPDall[-remfd])))
+plot(splossS2, FDS2.loss.ses) ; summary(lm(FDS2.loss.ses[-remfd]~splossS2[-remfd]))
+plot(log(splossS2), FDS2.loss.ses) ; summary(lm(FDS2.loss.ses[-remfd]~log(splossS2[-remfd])))
+```
+
+##Figure. % PD loss 
+```{r echo=F, results="hide"}
+#X11(width = 12, height = 3)
+#png("Fig1_PDloss.png", width = 12, height = 3, units = "in",res = 300)
+layout(matrix(c(1,2), 1,2,byrow = T))
+par(mar=c(0,1,0,0))
+
+# PD loss S1
+SR <- cbind(data.frame(XY),Var=p.PDlossS1)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='', legend=FALSE, 
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='', legend.only=T, horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6),smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+
+# PD loss S2
+SR <- cbind(data.frame(XY),Var=p.PDlossS2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='', legend=FALSE, 
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='', legend.only=T, horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6),smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.135, 0.18, 0.5), new=T, las=1, ps=7)
+hist(p.PDlossS1,main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.53, 0.635, 0.18, 0.5), new=T, las=1, ps=7)
+hist(p.PDlossS2,main="",ylab=" ",xlab=" ")
+
+#dev.off()
+```
+
+
+##Figure. % FD loss 
+```{r echo=F, results="hide"}
+#X11(width = 12, height = 3)
+#png("Fig1_FDloss.png", width = 12, height = 3, units = "in",res = 300)
+layout(matrix(c(1,2), 1,2,byrow = T))
+par(mar=c(0,1,0,0))
+
+# FD loss S1
+SR <- cbind(data.frame(XY),Var=p.FDlossS1)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='', legend=FALSE, 
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='', legend.only=T, horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6),smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+
+# FD loss S2
+SR <- cbind(data.frame(XY),Var=p.FDlossS2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='', legend=FALSE, 
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='', legend.only=T, horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6),smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.135, 0.18, 0.5), new=T, las=1, ps=7)
+hist(p.FDlossS1,main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.53, 0.635, 0.18, 0.5), new=T, las=1, ps=7)
+hist(p.FDlossS2,main="",ylab=" ",xlab=" ")
+
+#dev.off()
+```
+
+*** 
+
+\newpage
+
+##Figure. PD loss ses
+```{r echo=F, results="hide"}
+#X11(width = 12, height = 3)
+#pdf("PD_loss.pdf", width = 12, height = 3)
+##png("Fig2_PD_loss.png", width = 12, height = 3, units = "in",res = 300)
+layout(matrix(c(1,2), 1,2,byrow = T))
+par(mar=c(0,1,0,0))
+
+rem1 <- which(PDS1.loss.ses > 5)
+PDS1.loss.ses2 <- PDS1.loss.ses[-rem1]
+rem2 <- which(PDS2.loss.ses > 5)
+PDS2.loss.ses2 <- PDS2.loss.ses[-rem2]
+
+max_abolute_PDS1 <- max(abs(c(na.omit(PDS1.loss.ses2[!is.infinite(PDS1.loss.ses2)]))))
+max_abolute_PDS2 <- max(abs(c(na.omit(PDS2.loss.ses2[!is.infinite(PDS2.loss.ses2)]))))
+
+brkS11 <- round(func_splint(c(-max_abolute_PDS1,0),3),1)
+brkS12 <- round(func_splint(c(0,max_abolute_PDS1),3),1)
+brkS1 <- unique(sort(c(brkS11,brkS12)))
+
+brkS21 <- round(func_splint(c(-max_abolute_PDS2,0),3),1)
+brkS22 <- round(func_splint(c(0,max_abolute_PDS2),3),1)
+brkS2 <- unique(sort(c(brkS21,brkS22)))
+
+# PD loss
+SR <- cbind(data.frame(XY[-rem1,]),Var=PDS1.loss.ses2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_PDS1,max_abolute_PDS1), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6, at=brkS1,
+                    labels=brkS1), 
+     zlim=round(c(-max_abolute_PDS1,max_abolute_PDS1),1), 
+     smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# PD loss
+SR <- cbind(data.frame(XY[-rem2,]),Var=PDS2.loss.ses2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_PDS2,max_abolute_PDS2), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6, at=brkS2,
+                    labels=brkS2), 
+     zlim=round(c(-max_abolute_PDS2,max_abolute_PDS2),1), 
+     smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.135, 0.18, 0.5), new=T, las=1, ps=7)
+hist(PDS1.loss.ses2,main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.53, 0.635, 0.18, 0.5), new=T, las=1, ps=7)
+hist(PDS2.loss.ses2,main="",ylab=" ",xlab=" ")
+
+#dev.off()
+```
+
+- How much assemblage will not loose more or less species than expected by random?
+S1: `r (length(which(PDS1.loss.ses2>-1 & PDS1.loss.ses2 <1))/length(na.omit(PDS1.loss.ses2)))*100`%  
+S2: `r (length(which(PDS2.loss.ses2>-1 & PDS2.loss.ses2 <1))/length(na.omit(PDS2.loss.ses2)))*100`
+
+- How much positive and negative SES?
+S1: 
+Positive: `r (length(which(na.omit(PDS1.loss.ses2)>0))/length(na.omit(PDS1.loss.ses2)))*100`%  
+Negative: `r (length(which(na.omit(PDS2.loss.ses2)<0))/length(na.omit(PDS2.loss.ses2)))*100`%  
+S2: Positive: `r (length(which(na.omit(PDS2.loss.ses2)>0))/length(na.omit(PDS2.loss.ses2)))*100`%  
+Negative: `r (length(which(na.omit(PDS2.loss.ses2)<0))/length(na.omit(PDS2.loss.ses2)))*100`%  
+
+*** 
+
+\newpage
+##Figure. FD loss ses
+```{r echo=F, results="hide"}
+#X11(width = 12, height = 3)
+#pdf("FD_loss.pdf", width = 12, height = 3)
+##png("Fig3_FD_loss.png", width = 12, height = 3, units = "in",res = 300)
+layout(matrix(c(1,2), 1,2,byrow = T))
+par(mar=c(0,1,0,0))
+
+max_abolute_FDS1 <- max(abs(c(na.omit(FDS1.loss.ses[!is.infinite(FDS1.loss.ses)]))))
+max_abolute_FDS2 <- max(abs(c(na.omit(FDS2.loss.ses[!is.infinite(FDS2.loss.ses)]))))
+
+brkS11 <- round(func_splint(c(-max_abolute_FDS1,0),3),1)
+brkS12 <- round(func_splint(c(0,max_abolute_FDS1),3),1)
+brkS1 <- unique(sort(c(brkS11,brkS12)))
+
+brkS21 <- round(func_splint(c(-max_abolute_FDS2,0),3),1)
+brkS22 <- round(func_splint(c(0,max_abolute_FDS2),3),1)
+brkS2 <- unique(sort(c(brkS21,brkS22)))
+
+# FD loss
+SR <- cbind(data.frame(XY[-rem1,]),Var=FDS1.loss.ses[-rem1])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_FDS1,max_abolute_FDS1), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6, at=brkS1,
+                    labels=brkS1), 
+     zlim=round(c(-max_abolute_FDS1,max_abolute_FDS1),1), 
+     smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# FD loss
+SR <- cbind(data.frame(XY[-rem2,]),Var=FDS2.loss.ses[-rem2])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_FDS2,max_abolute_FDS2), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6, at=brkS2, labels=brkS2), 
+     zlim=round(c(-max_abolute_FDS2,max_abolute_FDS2),1), 
+     smallplot=c(0.5,0.75, 0.18,0.22),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.135, 0.18, 0.5), new=T, las=1, ps=7)
+hist(FDS1.loss.ses,main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.53, 0.635, 0.18, 0.5), new=T, las=1, ps=7)
+hist(FDS2.loss.ses,main="",ylab=" ",xlab=" ")
+
+
+#dev.off()
+```
+
+*** 
+
+\newpage
+
+##Figure. Vacant niche analysis. 
+Values represent the ratio between the volume of the detected hole and the total volume of a niche space (V~hole~/V~total~).
+```{r echo=F, results="hide"}
+#X11(width = 12, height = 3)
+##pdf("Fig4_HoleFig.pdf", width = 12, height = 3)
+#png("Fig4_HoleFig.png", width = 12, height = 3, units = "in",res = 300)
+layout(matrix(c(1,2), 1,2,byrow = T))
+par(mar=c(0,1,0,0))
+
+# Get class intervals Hole 1
+#H1_classint <- round(BAMMtools::getJenksBreaks(HoleS1, 5),1)
+# avoid identical breaks
+#H1_classint <- unique(H1_classint)
+# Get class intervals Hole 2
+#H2_classint <- BAMMtools::getJenksBreaks(HoleS2, 5)
+# avoid identical breaks
+#H2_classint <- unique(H2_classint)
+
+max_abolute_HS1 <- max(abs(c(na.omit(HoleS1[!is.infinite(HoleS1)]))))
+max_abolute_HS2 <- max(abs(c(na.omit(HoleS2[!is.infinite(HoleS2)]))))
+
+brkS1 <- round(func_splint(c(0,max_abolute_HS1),6),2)
+brkS2 <- round(func_splint(c(0,max_abolute_HS2),6),2)
+
+# Hole S1
+SR <- cbind(data.frame(XY),Var=HoleS1)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, legend=FALSE, breaks = brkS1,
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6),smallplot=c(0.5,0.75, 0.18,0.22), breaks = brkS1,
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+
+# Hole S2
+SR <- cbind(data.frame(XY),Var=HoleS2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main="",axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=F, breaks = brkS2,
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(cex.axis=0.6), smallplot=c(0.5,0.75, 0.18,0.22), breaks = brkS2,
+     col=colorRampPalette(c('darkblue','yellow','red'))(5))
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.135, 0.18, 0.5), new=T, las=1, ps=7)
+hist(HoleS1,main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.53, 0.635, 0.18, 0.5), new=T, las=1, ps=7)
+hist(HoleS2,main="",ylab=" ",xlab=" ")
+
+#expression('Hole fraction (V'[hole]*'/V'[total]*')')
+#dev.off()
+```
+
+- Hole size distribution?  
+S1:   
+Small: <10% = `r (length(which(HoleS1<.13))/length(na.omit(SPDS1)))*100`%
+Large: >30% = `r (length(which(HoleS1>.13))/length(na.omit(SPDS1)))*100`%
+median: `r mean(na.omit(HoleS1))`
+
+S2: `r (length(which(HoleS2>.4))/length(SPDS2))*100`
+median: `r mean(na.omit(HoleS2))`
+
+- Does hole fraction correlate with sp loss fraction?  
+S1: `r summary(lm(HoleS1~p.splossS1))` 
+S2: `r summary(lm(HoleS2~p.splossS2))` 
+
+##All plots SES
+```{r}
+#X11(width = 15, height = 5)
+##png("FigAll.png", width = 15, height = 5, units = "in",res = 300)
+pdf("FigAll2.pdf", width = 15, height = 5)
+layout(matrix(c(1:6),2,3, byrow = F))
+par(mar=c(0,0,0,0))
+
+# SPD loss S1
+SR <- cbind(data.frame(XY),Var=p.splossS1)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='Richness-loss (%)',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='', horiz=TRUE, legend.shrink=0.3, col=colorRampPalette(c('darkblue','yellow','red'))(20))
+plot(mundi, axes = F, add=T)
+
+# PD loss
+rem1 <- which(PDS1.loss.ses > 5)
+rem2 <- which(PDS2.loss.ses > 5)
+
+max_abolute_PDS1 <- max(abs(c(na.omit(PDS1.loss.ses2[!is.infinite(PDS1.loss.ses2)]))))
+max_abolute_PDS2 <- max(abs(c(na.omit(PDS2.loss.ses2[!is.infinite(PDS2.loss.ses2)]))))
+
+brkS11 <- round(func_splint(c(-max_abolute_PDS1,0),3),1)
+brkS12 <- round(func_splint(c(0,max_abolute_PDS1),3),1)
+brkS1 <- unique(sort(c(brkS11,brkS12)))
+
+brkS21 <- round(func_splint(c(-max_abolute_PDS2,0),3),1)
+brkS22 <- round(func_splint(c(0,max_abolute_PDS2),3),1)
+brkS2 <- unique(sort(c(brkS21,brkS22)))
+
+SR <- cbind(data.frame(XY[-rem1,]),Var=PDS1.loss.ses[-rem1])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='PD-loss',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_PDS1,max_abolute_PDS1), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(at=brkS1,
+                    labels=brkS1), 
+     zlim=round(c(-max_abolute_PDS1,max_abolute_PDS1),1),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# FD loss
+max_abolute_FDS1 <- max(abs(c(na.omit(FDS1.loss.ses[!is.infinite(FDS1.loss.ses)]))))
+max_abolute_FDS2 <- max(abs(c(na.omit(FDS2.loss.ses[!is.infinite(FDS2.loss.ses)]))))
+
+brkS11 <- round(func_splint(c(-max_abolute_FDS1,0),3),1)
+brkS12 <- round(func_splint(c(0,max_abolute_FDS1),3),1)
+brkS1 <- unique(sort(c(brkS11,brkS12)))
+
+brkS21 <- round(func_splint(c(-max_abolute_FDS2,0),3),1)
+brkS22 <- round(func_splint(c(0,max_abolute_FDS2),3),1)
+brkS2 <- unique(sort(c(brkS21,brkS22)))
+
+SR <- cbind(data.frame(XY[-rem1,]),Var=FDS1.loss.ses[-rem1])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='FD-loss',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_FDS1,max_abolute_FDS1), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(at=brkS1,
+                    labels=brkS1), 
+     zlim=round(c(-max_abolute_FDS1,max_abolute_FDS1),1), 
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+
+# SPD loss S2
+SR <- cbind(data.frame(XY),Var=p.splossS2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR,main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='', horiz=TRUE, legend.shrink=0.3, col=colorRampPalette(c('darkblue','yellow','red'))(20))
+plot(mundi, axes = F, add=T)
+
+# PD loss
+SR <- cbind(data.frame(XY[-rem2,]),Var=PDS2.loss.ses[-rem2])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_PDS2,max_abolute_PDS2), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(at=brkS2,
+                    labels=brkS2), 
+     zlim=round(c(-max_abolute_PDS2,max_abolute_PDS2),1),
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# FD loss
+SR <- cbind(data.frame(XY[-rem2,]),Var=FDS2.loss.ses[-rem2])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+plot(SR, main='',axes=F,box=F, col='white',legend=F)
+plot(land, add=T,col="gray",border="gray")
+plot(SR, add=T, main='',legend=FALSE, zlim=c(-max_abolute_FDS2,max_abolute_FDS2), col=colorRampPalette(c('darkblue','white','red'))(20))
+plot(mundi, axes = F, add=T)
+plot(SR, add=T, main='',legend.only=T,horiz=TRUE,legend.shrink=0.3,
+     axis.args=list(at=brkS2, labels=brkS2), 
+     zlim=round(c(-max_abolute_FDS2,max_abolute_FDS2),1), 
+     col=colorRampPalette(c('darkblue','white','red'))(20))
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.08, 0.60, 0.73), new=T, las=1, ps=10)
+hist(p.splossS1,main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.03, 0.08, 0.10, 0.23), new=T, las=1, ps=10)
+hist(p.splossS2,main="",ylab=" ",xlab="")
+
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.36, 0.41, 0.60, 0.73), new=T, las=1, ps=10)
+hist(PDS1.loss.ses[-rem1],main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.36, 0.41, 0.10, 0.23), new=T, las=1, ps=10)
+hist(PDS2.loss.ses[-rem2],main="",ylab=" ",xlab="")
+
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.69, 0.74, 0.60, 0.73), new=T, las=1, ps=10)
+hist(FDS1.loss.ses[-rem1],main="",ylab=NULL,xlab="")
+# Plot the histogram as inset 
+#   x_left, x_right, y_bottom, y_top are portions of the main chart X and Y spans.
+par(fig=c(0.69, 0.74, 0.10, 0.23), new=T, las=1, ps=10)
+hist(FDS2.loss.ses[-rem2],breaks=30,main="",ylab=" ",xlab="")
+
+dev.off()
+
+
+```
+
+##Figure. + PD + FD
+###setup
+```{r eval=F}
+#function to generate bivariate maps. Copy and paste that into R:
+bivariate.map<-function(rasterx, rastery, colormatrix=col.matrix, nquantiles=10){
+quanmean<-getValues(rasterx)
+quanmean[mapply(is.infinite, quanmean)] <- NA
+temp <- data.frame(quanmean, quantile=rep(NA, length(quanmean)))
+brks <- with(temp, quantile(temp,na.rm=TRUE, probs = c(seq(0,1,1/nquantiles))))
+r1 <- within(temp, quantile <- cut(quanmean, breaks = brks, labels = 2:length(brks),include.lowest = TRUE))
+quantr<-data.frame(r1[,2]) 
+quanvar<-getValues(rastery)
+quanvar[mapply(is.infinite, quanvar)] <- NA
+temp <- data.frame(quanvar, quantile=rep(NA, length(quanvar)))
+brks <- with(temp, quantile(temp,na.rm=TRUE, probs = c(seq(0,1,1/nquantiles))))
+r2 <- within(temp, quantile <- cut(quanvar, breaks = brks, labels = 2:length(brks),include.lowest = TRUE))
+quantr2<-data.frame(r2[,2])
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+col.matrix2<-colormatrix
+cn<-unique(colormatrix)
+for(i in 1:length(col.matrix2)){
+ifelse(is.na(col.matrix2[i]),col.matrix2[i]<-1,col.matrix2[i]<-which(col.matrix2[i]==cn)[1])}
+cols<-numeric(length(quantr[,1]))
+for(i in 1:length(quantr[,1])){
+a<-as.numeric.factor(quantr[i,1])
+b<-as.numeric.factor(quantr2[i,1])
+cols[i]<-as.numeric(col.matrix2[b,a])}
+r<-rasterx
+r[1:length(r)]<-cols
+return(r)}
+
+colmat<-function(nquantiles=10, upperleft=rgb(0,150,235, maxColorValue=255), upperright=rgb(130,0,80, maxColorValue=255), bottomleft="grey", bottomright=rgb(255,230,15, maxColorValue=255), xlab="x label", ylab="y label"){
+my.data<-seq(0,1,.01)
+my.class<-classIntervals(my.data,n=nquantiles,style="quantile")
+my.pal.1<-findColours(my.class,c(upperleft,bottomleft))
+my.pal.2<-findColours(my.class,c(upperright, bottomright))
+col.matrix<-matrix(nrow = 101, ncol = 101, NA)
+for(i in 1:101){
+my.col<-c(paste(my.pal.1[i]),paste(my.pal.2[i]))
+col.matrix[102-i,]<-findColours(my.class,my.col)}
+plot(c(1,1),pch=19,col=my.pal.1, cex=0.5,xlim=c(0,1),ylim=c(0,1),frame.plot=F, xlab=xlab, ylab=ylab,cex.lab=1.3)
+for(i in 1:101){
+col.temp<-col.matrix[i-1,]
+points(my.data,rep((i-1)/100,101),pch=15,col=col.temp, cex=1)}
+seqs<-seq(0,100,(100/nquantiles))
+seqs[1]<-1
+col.matrix <- col.matrix[c(seqs), c(seqs)]}
+
+
+# You can specify the number of quantiles, colors and labels of your color matrix. Example:
+
+col.matrix <- colmat(nquantiles=7, upperleft="yellow", upperright="red", bottomleft="green", bottomright="blue", xlab="PD-loss", ylab="FD-loss")
+
+pdf("PDvsFD-loss_legend.pdf", width = 4, height = 4)
+col.matrix <- colmat(nquantiles=10, upperleft="yellow", upperright="red", bottomleft="green", bottomright="blue", xlab="PD-loss", ylab="FD-loss")
+dev.off()
+
+# But let's use this simple code. You can change "nquantiles" to generate color matrices with different color schemes. For example, change it to 4 to produce a 4x4 color scheme.
+
+#col.matrix <- colmat(nquantiles=30)
+```
+
+### Figure
+```{r eval=F}
+SR <- cbind(data.frame(XY[-rem1,]),Var=PDS1.loss.ses2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+PDS1ras <- raster(SR)
+
+SR <- cbind(data.frame(XY[-rem2,]),Var=PDS2.loss.ses2)
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+PDS2ras <- raster(SR)
+
+SR <- cbind(data.frame(XY[-rem1,]),Var=FDS1.loss.ses[-rem1])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+FDS1ras <- raster(SR)
+
+SR <- cbind(data.frame(XY[-rem2,]),Var=FDS2.loss.ses[-rem2])
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+FDS2ras <- raster(SR)
+
+pdf("Fig_PD-FD-Diff.pdf", width = 5, height = 5)
+layout(matrix(c(1,2),2,1, byrow = F))
+par(mar=c(0,0,0,0))
+
+bivmapS1<-bivariate.map(PDS1ras,FDS1ras, colormatrix=col.matrix)
+
+plot(land,col="gray",border="gray")
+plot(bivmapS1,frame.plot=F,axes=F,box=F,add=T,legend=F,col=as.vector(col.matrix))
+plot(mundi, axes = F, add=T)
+
+bivmapS2<-bivariate.map(PDS2ras,FDS2ras, colormatrix=col.matrix)
+
+plot(land,col="gray",border="gray")
+plot(bivmapS2,frame.plot=F,axes=F,box=F,add=T,legend=F,col=as.vector(col.matrix))
+plot(mundi, axes = F, add=T)
+
+dev.off()
+```
+
+##Figure. + PD + FD II
+```{r eval=F}
+dataplotS1 <- na.omit(data.frame(XY,PD=extract(PDS1ras,XY),FD=extract(FDS1ras,XY),col=extract(bivmapS1,XY)))
+dataplotS1$cond <- NA
+dataplotS1$cond[which(dataplotS1$PD>0 & dataplotS1$FD>0)] <- "HH"
+dataplotS1$cond[which(dataplotS1$PD>0 & dataplotS1$FD<0)] <- "HL"
+dataplotS1$cond[which(dataplotS1$PD<0 & dataplotS1$FD<0)] <- "LL"
+dataplotS1$cond[which(dataplotS1$PD<0 & dataplotS1$FD>0)] <- "LH"
+dataplotS1$cond2 <- NA
+dataplotS1$cond2[which(dataplotS1$cond=="HH")] <- 
+  dataplotS1$FD[which(dataplotS1$cond=="HH")] / dataplotS1$PD[which(dataplotS1$cond=="HH")]
+dataplotS1$cond2[which(dataplotS1$cond=="HL")] <- 
+  dataplotS1$FD[which(dataplotS1$cond=="HL")] / dataplotS1$PD[which(dataplotS1$cond=="HL")]
+dataplotS1$cond2[which(dataplotS1$cond=="LL")] <- 
+  dataplotS1$FD[which(dataplotS1$cond=="LL")] / dataplotS1$PD[which(dataplotS1$cond=="LL")]
+dataplotS1$cond2[which(dataplotS1$cond=="LH")] <- 
+  dataplotS1$FD[which(dataplotS1$cond=="LH")] / dataplotS1$PD[which(dataplotS1$cond=="LH")]
+
+dataplotS1$cond2 <- abs(dataplotS1$cond2)
+dataplotS1$cond2 <- dataplotS1$cond2*100
+
+dataplotS1$cond3 <- NA
+dataplotS1$cond3[which(dataplotS1$cond2>=0)] <- ">0"
+dataplotS1$cond3[which(dataplotS1$cond2>50)] <- ">50"
+dataplotS1$cond3[which(dataplotS1$cond2>100)] <- ">100"
+dataplotS1$cond3[which(dataplotS1$cond2>=150)] <- ">150"
+
+dataplotS1$cond3 <- paste(dataplotS1$cond,dataplotS1$cond3,sep = "_")
+
+HHramp <- colorRampPalette(c('yellow','red'))(4)
+HLramp <- colorRampPalette(c('lightpink','deeppink3'))(4)
+LHramp <- colorRampPalette(c('lightblue','blue'))(4)
+LLramp <- colorRampPalette(c('lightgreen','darkgreen'))(4)
+
+cols <- c("HH_>150" = HHramp[4], "HH_>100" = HHramp[3], "HH_>50" = HHramp[2],"HH_>0" = HHramp[1],
+          "HL_>150" = HLramp[4], "HL_>100" = HLramp[3], "HL_>50" = HLramp[2],"HL_>0" = HLramp[1],
+          "LH_>150" = LHramp[4], "LH_>100" = LHramp[3], "LH_>50" = LHramp[2],"LH_>0" = LHramp[1],
+          "LL_>150" = LLramp[4], "LL_>100" = LLramp[3], "LL_>50" = LLramp[2],"LL_>0" = LLramp[1])
+
+p1<-ggplot(dataplotS1, aes(PD, FD, color=cond3)) +
+  geom_point(size=1, show.legend = FALSE) +
+  theme_bw() +
+  theme(text = element_text(colour="black", size = 15), aspect.ratio=1) + 
+  labs(x = "SES PD-loss", y = "SES FD-loss") +
+  geom_hline(yintercept=0,color="gray20",linetype=2, size=1) +
+  geom_vline(xintercept=0,color="gray20",linetype=2, size=1) +
+  scale_color_manual(values=cols)
+
+dataplotS2 <- na.omit(data.frame(XY,PD=extract(PDS2ras,XY),FD=extract(FDS2ras,XY),col=extract(bivmapS2,XY)))
+dataplotS2$cond <- NA
+dataplotS2$cond[which(dataplotS2$PD>0 & dataplotS2$FD>0)] <- "HH"
+dataplotS2$cond[which(dataplotS2$PD>0 & dataplotS2$FD<0)] <- "HL"
+dataplotS2$cond[which(dataplotS2$PD<0 & dataplotS2$FD<0)] <- "LL"
+dataplotS2$cond[which(dataplotS2$PD<0 & dataplotS2$FD>0)] <- "LH"
+dataplotS2$cond2 <- NA
+dataplotS2$cond2[which(dataplotS2$cond=="HH")] <- 
+  dataplotS2$FD[which(dataplotS2$cond=="HH")] / dataplotS2$PD[which(dataplotS2$cond=="HH")]
+dataplotS2$cond2[which(dataplotS2$cond=="HL")] <- 
+  dataplotS2$FD[which(dataplotS2$cond=="HL")] / dataplotS2$PD[which(dataplotS2$cond=="HL")]
+dataplotS2$cond2[which(dataplotS2$cond=="LL")] <- 
+  dataplotS2$FD[which(dataplotS2$cond=="LL")] / dataplotS2$PD[which(dataplotS2$cond=="LL")]
+dataplotS2$cond2[which(dataplotS2$cond=="LH")] <- 
+  dataplotS2$FD[which(dataplotS2$cond=="LH")] / dataplotS2$PD[which(dataplotS2$cond=="LH")]
+
+dataplotS2$cond2 <- abs(dataplotS2$cond2)
+dataplotS2$cond2 <- dataplotS2$cond2*100
+
+dataplotS2$cond3 <- NA
+dataplotS2$cond3[which(dataplotS2$cond2>=0)] <- ">0"
+dataplotS2$cond3[which(dataplotS2$cond2>50)] <- ">50"
+dataplotS2$cond3[which(dataplotS2$cond2>100)] <- ">100"
+dataplotS2$cond3[which(dataplotS2$cond2>=150)] <- ">150"
+
+dataplotS2$cond3 <- paste(dataplotS2$cond,dataplotS2$cond3,sep = "_")
+
+HHramp <- colorRampPalette(c('yellow','red'))(4)
+HLramp <- colorRampPalette(c('lightpink','deeppink3'))(4)
+LHramp <- colorRampPalette(c('lightblue','blue'))(4)
+LLramp <- colorRampPalette(c('lightgreen','darkgreen'))(4)
+
+p2<-ggplot(dataplotS2, aes(PD, FD, color=cond3)) +
+  geom_point(size=1, show.legend = FALSE) +
+  theme_bw() +
+  theme(text = element_text(colour="black", size = 15), aspect.ratio=1) + 
+  labs(x = "SES PD-loss", y = "SES FD-loss") +
+  geom_hline(yintercept=0,color="gray20",linetype=2, size=1) +
+  geom_vline(xintercept=0,color="gray20",linetype=2, size=1) +
+  scale_color_manual(values=cols)
+
+pdf(paste("Fig3_PD-FD-Diff2.pdf",sep=""),width=7.5*2,height=5,useDingbats=F)
+multiplot(p1, p2, cols = 2)
+dev.off()
+
+
+#X11(width = 12, height = 3)
+pdf("Fig3_PD-FD-Diff.pdf", width = 10, height = 2.5)
+layout(matrix(c(1,2),1,2, byrow = F))
+par(mar=c(0,0,0,0))
+
+rasterplot <- data.frame(dataplotS1[,1:2], cond=dataplotS1$cond3)
+coordinates(rasterplot) <- ~ x + y ; gridded(rasterplot) <- TRUE ; rasterplot <- raster(rasterplot)
+
+plot(land,col="gray",border="gray")
+plot(rasterplot, col=cols, add=T,axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T)
+
+rasterplot <- data.frame(dataplotS2[,1:2], cond=dataplotS2$cond3)
+coordinates(rasterplot) <- ~ x + y ; gridded(rasterplot) <- TRUE ; rasterplot <- raster(rasterplot)
+
+plot(land,col="gray",border="gray")
+plot(rasterplot, col=cols, add=T,axes=F,box=F,legend=F)
+plot(mundi, axes = F, add=T)
+
+dev.off()
+```
+
+```{r eval=F}
+
+################
+
+library(viridis)
+
+ggplot(dataplotS1, aes(PD, FD, color=atan(FD/PD)))+
+  geom_point(size=2, show.legend = FALSE) +
+  theme_classic()+
+  theme(text = element_text(colour="black", size = 26), aspect.ratio=1) + 
+  labs(x = "SES PD-loss", y = "SES FD-loss")+
+  geom_hline(yintercept=0,color="gray20",linetype=2)+
+  geom_vline(xintercept=0,color="gray20",linetype=2)+
+  scale_color_viridis(option="C")
+
+ggplot(dataplotS1, aes(PD,FD, color=PD, color2=FD))+
+  geom_point(size=2, show.legend = FALSE) +
+  theme_classic()+
+  #scale_x_continuous(breaks=c(4,0,4)) +
+  #scale_y_continuous(breaks=c(4,0,4)) +
+  theme(text = element_text(colour="black", size = 26), aspect.ratio=1) + 
+  labs(x = "SES PD-loss", y = "SES FD-loss")+
+  geom_hline(yintercept=0,color="gray20",linetype=2)+
+  geom_vline(xintercept=0,color="gray20",linetype=2)+
+  scale_color_colorplane(color_projection = "red_blue")
+
+ggplot(dataplotS1, aes(PD,FD, color=PD, color2=FD))+
+  geom_point(size=2, show.legend = FALSE) +
+  theme_classic()+
+  #scale_x_continuous(breaks=c(4,0,4)) +
+  #scale_y_continuous(breaks=c(4,0,4)) +
+  theme(text = element_text(colour="black", size = 26), aspect.ratio=1) + 
+  labs(x = "SES PD-loss", y = "SES FD-loss")+
+  geom_hline(yintercept=0,color="gray20",linetype=2)+
+  geom_vline(xintercept=0,color="gray20",linetype=2)+
+  scale_color_colorplane(color_projection = interpolate_projection,
+                         zero_color = "red",
+                         horizontal_color = "red",
+                         vertical_color = "green")
+
+
+ggplot(dataplotS1, aes(PD, FD, color=dist, fill=cond))+
+  geom_point(size=2, show.legend = FALSE) +
+  theme_classic()+
+  theme(text = element_text(colour="black", size = 26), aspect.ratio=1) + 
+  labs(x = "SES PD-loss", y = "SES FD-loss")+
+  geom_hline(yintercept=0,color="gray20",linetype=2)+
+  geom_vline(xintercept=0,color="gray20",linetype=2)+
+  scale_color_viridis(option="C",direction = -1)
+
+```
+
+#Correlation variabes
+```{r eval=F}
+#pdf("Fig_pairscor_S1.png", width = 10, height = 12)
+pairs(cbind(splossS1,PDlossS1,FDlossS1))
+#dev.off()
+
+#pdf("Fig_pairscor_S2.png", width = 10, height = 12)
+pairs(cbind(splossS2,PDlossS2,FDlossS2))
+#dev.off()
+
+```
+
+
+#Spatial autocorrelation
+```{r eval=F}
+
+# Models
+
+modelos <- list(as.formula(paste("FD_cc~", "PD_cc",sep = "")), 
+                as.formula(paste("FD_cc_ses~", "PD_cc_ses",sep = "")),
+                as.formula(paste("FD_closs~", "PD_closs",sep = "")),
+                as.formula(paste("FD_closs_ses~", "PD_closs_ses",sep = "")))
+ 
+# set cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+start_time <- Sys.time()
+
+# calculate OLS and SAR in parallel
+models <- foreach(i=1:length(modelos), .packages=c('spdep')) %dopar% { 
+  test <- lm(modelos[[i]], data = dataset)
+  # check correlogram
+  correl <- pgirmess::correlog(coords=dataset[names(residuals(test)),1:2], 
+                               z=residuals(test), method="Moran")
+  correl <- data.frame(correl)
+  # Define define a connectivity (neighbourhood) matrix
+  # set distance 2 as the second distance class
+  nbdist<-dnearneigh(x=as.matrix(dataset[,1:2]), d1=0, d2=correl$dist.class[2]) # define connectivity matrix (0/1)
+  neigh.dist<-nbdists(nbdist, as.matrix(dataset[,1:2]), longlat=F) # compute the Euclidean distance between neighbouring sites
+  inverse<-lapply(neigh.dist, function(x) (1/(x^2))) # compute the inverse distance weigthed matrix
+  nlw<-nb2listw(neighbours=nbdist, glist=inverse, style="W", zero.policy=FALSE) # coding style W = row standardised
+  
+  errorsarlm(lm(modelos[[i]], data=dataset), listw=nlw)
+}
+# stop the cluster
+stopCluster(cl)
+
+
+# Calculate correlograms
+
+# set cluster
+ncores <- detectCores()
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+start_time <- Sys.time()
+
+correls <- foreach(i=1:length(modelos), .packages=c('pgirmess')) %dopar% { 
+  lmodel <- lm(modelos[[i]], data=dataset)
+  correl.lm <- pgirmess::correlog(coords=dataset[names(residuals(lmodel)),1:2], 
+                                  z=residuals(lmodel), method="Moran")
+  correl.lm <- data.frame(correl.lm)
+  
+  correl.sar <- pgirmess::correlog(coords=dataset[names(residuals(models[[i]])),1:2], 
+                                   z=residuals(models[[i]]), method="Moran")
+  correl.sar <- data.frame(correl.sar)
+  
+  return(list(correl.lm, correl.sar))
+  
+}
+
+# stop the cluster
+stopCluster(cl)
+
+
+```
+
+# Phylogenetic signal
+## Prepare
+```{r phylogenetic_signal_prepare, warning= F}
+IUCN$risk[which(IUCN$IUCN=="CR"|IUCN$IUCN=="EN")] <- "RISK"
+IUCN$risk[which(!(IUCN$IUCN=="CR"|IUCN$IUCN=="EN"))] <- "N-RISK"
+
+IUCN$risk2[which(IUCN$IUCN=="CR"|IUCN$IUCN=="EN"|IUCN$IUCN=="NT"|IUCN$IUCN=="VU")] <- "RISK"
+IUCN$risk2[which(!(IUCN$IUCN=="CR"|IUCN$IUCN=="EN"|IUCN$IUCN=="NT"|IUCN$IUCN=="VU"))] <- "N-RISK"
+ 
+library(caper)
+# Make a comaprative dataset
+sigrisk <- comparative.data(tree, IUCN, "Species")
+# The value of D can be both smaller than 0 (highly conserved) and greater than 1 (overdispersed) and the distributions of scaled D from the simulations are used to assess the significance of the observed scaled D. The plot method generates density plots of the distributions of the two simulations relative to the observed D value.
+sigS1 <- phylo.d(sigrisk, binvar=risk)
+plot(sigS1)
+sigS2 <- phylo.d(sigrisk, binvar=risk2)
+plot(sigS2)
+```
+
+# Supp table & figures
+```{r}
+# how many communities with high PD-loss, low PD-loss, high FD-loss, and loss FD-loss? 
+#Values greater than 1.96 indicate a higher than expected functional dissimilarity between the communities and values below -1.96 indicate a lower than expected functional dissimilarity between the two communities.
+
+HPDL <- (length(which(PDS1.loss.ses > 1.96))/length(PDS1.loss.ses))*100 # high PD-loss
+LPDL <- (length(which(PDS1.loss.ses < -1.96))/length(PDS1.loss.ses))*100 # low PD-loss
+HFDL <- (length(which(FDS1.loss.ses > 1.96))/length(FDS1.loss.ses))*100 # high FD-loss
+LFDL <- (length(which(FDS1.loss.ses < -1.96))/length(FDS1.loss.ses))*100 # low FD-loss
+
+HPDL <- (length(which(PDS2.loss.ses > 1.96))/length(PDS2.loss.ses))*100 # high PD-loss
+LPDL <- (length(which(PDS2.loss.ses < -1.96))/length(PDS2.loss.ses))*100 # low PD-loss
+HFDL <- (length(which(FDS2.loss.ses > 1.96))/length(FDS2.loss.ses))*100 # high FD-loss
+LFDL <- (length(which(FDS2.loss.ses < -1.96))/length(FDS2.loss.ses))*100 # low FD-loss
+```
+
+# save image
+```{r eval = F, echo = F}
+save.image("PD+FD_erosion_new.RData")
+```
+#END OF CODE
