@@ -1,1 +1,1 @@
-This repository contains code for "Decoupled erosion of amphibians’ phylogenetic and functional diversity from extinction"
+This repository contains code for Oliveira, B.F., Scheffers, B.R. & Costa, G.C. 2020. Decoupled erosion of amphibian phylogenetic and functional diversity due to extinction. Global Ecology and Biogeography, 29: 309-319
