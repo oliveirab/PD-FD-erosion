@@ -1,0 +1,500 @@
+---
+titlG: "Erosion of phylogenetic and functional diversity in Amphibians"
+author: "Brunno F Oliveira^1^; Gabriel C Costa^1^"
+datG: "October 20, 2015\n**1** Programa de Pós-graduação em Ecologia, Universidade
+  Federal do Rio Grande do Norte, Lagoa Nova, 59072-970, Natal, RN, Brazil. **Corresponding
+  author:** (brunno.oliveira@me.com) "
+output: html_document
+themG: united
+toc: yes
+---
+
+*** 
+
+\newpage
+
+
+Packages versions:
+```{r info,message=FALSE,echo=F}
+info <- sessionInfo()
+```
+
+# We used `r info[1]$R$ver` and the following packages:
+```{r packages,message=FALSE,echo=T}
+list.of.packages <- c("sp",  "rgdal",  "raster",  "letsR",  "maptools",  "maps",  "maptools",  "rgeos",  "raster",  "stringr",  "picante",  "ape",  "rgdal",  "ggplot2",  "geiger",  "ade4",  "foreach",  "parallel",  "doParallel",  "PBSmapping",  "nabor",  "plot3D",  "knitr",  "vegan",  "phytools",  "rworldmap",  "FD", "rredlist", "XML")
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+sapply(list.of.packages, require, character.only = TRUE)
+
+```
+`r list.of.packages`
+
+```{r echo=F}
+rm(list=ls())
+gc()
+```
+
+# Set working directory & load functions & GIS
+```{r echo=F}
+
+
+iucn_token <- "72384daa25849d16f97b3b180783680b4d9492b51a64565fdfefbebec7de6cfe"
+
+b.accepted.name <- function(input) {
+  
+  h <- try(htmlParse(paste("http://apiv3.iucnredlist.org/api/v3/species/synonym/",
+                           input, "?token=", iucn_token,sep = "")), silent = TRUE)
+  h <- as(h, "character")
+  
+  h2 <- gsub('^.*"accepted_name":\\s*|\\s*,.*$', '', h)
+  h2 <- gsub("\"", '', h2, fixed = TRUE)
+  
+  return(h2)
+}
+
+b.accepted.name2 <- function(input) {
+  
+  h <- try(htmlParse(paste("http://apiv3.iucnredlist.org/api/v3/species/id/",
+                           input, "?token=", iucn_token,sep = "")), silent = TRUE)
+  h <- as(h, "character")
+  
+  h2 <- gsub('^.*"scientific_name":\\s*|\\s*,.*$', '', h)
+  h2 <- gsub("\"", '', h2, fixed = TRUE)
+  
+  return(h2)
+}
+```
+
+# Load land data
+```{r , echo=F}
+land <- readOGR("G:/GIS/Shp files/ne_50m_land/ne_50m_land_no_artic.shp")
+crs(land) <-"+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 "
+land <- spTransform(land, CRS("+proj=cea +datum=WGS84"))
+
+
+# REFERENCE PROJECTION MAP
+mapa <- raster(xmn = -20592508, xmx = 20588492, ymn = -5743602, ymx = 6573398,
+               crs = CRS("+proj=cea +datum=WGS84"))
+res(mapa) <- 222000
+```
+
+1. Species occurrences
+-------------------------------
+```{r echo=F}
+# Load species occurrences (6515 spp)
+
+# occr <- read.csv("G:/GIS/Biodiversity/Distributions/amphibians_occr_2dg_equal_area.csv")
+occr <- read.csv("G:/GIS/Biodiversity/Distributions/amphibians_occr_equal_area.csv")
+
+XY<-occr[,1:2] # get coordinates
+XY <- as.data.frame(XY)
+names(XY) <-c("x","y")
+
+occr <- as.data.frame(occr[,-1:-2]) # get sps occurrences
+
+# Are there communities without species?
+if(any(rowSums(occr)==0)){
+  # Remove communities without species...
+  occr <- occr[which(Rich==0),]
+}
+# Are there species occurring nowhere?
+if(any(apply(occr, 2, sum)==0)){
+  # Remove species occurring nowhere...
+  nosp <- which(apply(occr, 2, sum)==0)
+  occr <- occr[,-nosp]
+}
+
+names(occr) <- gsub("\\.","_",names(occr)) 
+
+spp <- data.frame(colnames(occr))
+names(spp) <- "Species_name"
+
+# Get IUCN status
+IUCN <- read.csv("IUCN_DD_predicted.csv")[,-1]
+
+# keep occurrences of species in IUCN dataset (with threat status)
+occr <- occr[, which(spp$Species_name %in% IUCN$Species)]
+
+# Species in IUCN but not in occr?
+spstolook <- which(!IUCN$Species %in% names(occr))
+# View(IUCN[spstolook,])
+
+# new spp data
+spp <- data.frame(colnames(occr))
+names(spp) <- "Species_name"
+
+# Original N spp
+origSppN <- length(spp$Species_name)
+
+```
+
+The original species occurrence dataset comprises `r nrow(spp)` species
+
+2. Trait data
+-------------------------------
+```{r echo=F}
+trait <- data.frame(read.csv("AmphiBIO_v1_Aug2015_imputed.csv", header=TRUE))
+traitdata <- as.character(trait$Species)
+
+# Original N spp
+origTraitN <- nrow(trait)
+
+for(i in 1:length(traitdata)){ # Fix names
+  #cat("\r",i,"of", length(traitdata))
+  if(str_sub(traitdata[i], start= -1) == "_"){ # check is species names ends with '_'
+    traitdata[i] <- gsub('.{1}$', '', traitdata[i]) # remove '_' when species names ends with
+  }
+    if(str_sub(traitdata[i], start= -2) == ".1"){ # check is species names ends with '.1'
+    traitdata[i] <- gsub('.1', '', traitdata[i]) # remove '.1' when species names ends with
+  }
+  else{
+    traitdata[i] <- traitdata[i]
+  }
+}
+
+traitdata <- data.frame(traitdata)
+
+traitdata <- gsub(" ","_",traitdata[,1])
+
+trait$Species <- traitdata
+
+rem <- which(duplicated(traitdata)) # remove duplicated species
+traitdata <- data.frame(traitdata[-rem])
+trait <- trait[-rem,]
+
+rownames(trait) <- traitdata[,1]
+
+# fix trait place
+fos <- ter <- aqua <- arb <- NA
+
+for(i in 1:nrow(trait)){
+  #cat("\r",i,"of", nrow(trait))
+  tmp <- strsplit(as.character(trait$Place[i]), "")[[1]]
+  ifelse("1" %in% tmp, fos[i] <- 1, fos[i] <- 0)
+  ifelse("2" %in% tmp, ter[i] <- 1, ter[i] <- 0)
+  ifelse("3" %in% tmp, aqua[i] <- 1, aqua[i] <- 0)
+  ifelse("4" %in% tmp, arb[i] <- 1, arb[i] <- 0)
+}
+
+# fix trait breeding strategy
+dir <- lar <- viv <- NA
+
+for(i in 1:nrow(trait)){
+  #cat("\r",i,"of", nrow(trait))
+  tmp <- as.character(trait$Breeding_strategy_type[i])
+  ifelse(tmp=="LAR", lar[i] <- 1, lar[i] <- 0)
+  ifelse(tmp=="DIR", dir[i] <- 1, dir[i] <- 0)
+  ifelse(tmp=="VIV", viv[i] <- 1, viv[i] <- 0)
+}
+
+trait <- cbind(trait,fos,ter,aqua,arb,dir,lar,viv)
+trait <- trait[,c(-1:-4,-6,-9)]
+
+# fix species names
+
+fix_ <- "yes"
+
+if (fix_ == "no"){
+  # which species we have traits but cant find in the IUCN list?
+  spstolook <- which(!trait$Species %in% IUCN$Species)
+  
+  #spstolook <- which(trait$Species=="Error in htmlParse(paste(http://apiv3.iucnredlist.org/api/v3/species/id/")
+  
+  # Match species names with IUCN
+  # Takes a loooong of time to run depending on the internet connection.
+  # !!! Dont run if you already ran it before!!!
+  for(i in 1:length(spstolook)) { cat("\r", i, "from", length(spstolook))
+    
+    togo <- spstolook[i]
+    resloop <- rl_synonyms(gsub('_',' ',trait$Species[togo]), key = iucn_token)
+    if(length(resloop$result)>0){ # if found, save ...
+      trait$Species[togo] <- resloop$result$accepted_name[1]
+    }
+    if(length(resloop$result)==0){ # if not found, search narrative and get ID
+      resloop <- rl_narrative(gsub('_',' ',trait$Species[togo]), key = iucn_token)
+      
+      if(length(resloop$result)>0){ # if found, get name from ID
+        trait$Species[togo] <- b.accepted.name2(as.character(resloop$result$species_id))
+      }
+    }
+  }
+  trait$Species <- gsub(" ","_",trait$Species)
+  # save it!
+  write.csv(data.frame(Species=trait$Species),'trait_names_updated.csv')
+}
+
+if(fix_ == "yes"){  # Open if you ran this before...
+  trait_namesnew <- read.csv('trait_names_updated.csv')[,-1]
+}
+
+trait$Species <- trait_namesnew
+trait <- merge(trait, IUCN, by = "Species", all.x = T)
+  
+if(length(which(is.na(trait$IUCN)))>0){
+  trait <- trait[-which(is.na(trait$IUCN)),] # remove species not found in IUCN catalog (maybe newly describid species or synonims)
+}
+
+rem <- which(duplicated(trait$Species)) # remove duplicated species
+trait <- trait[-rem,]
+rownames(trait) <- trait$Species
+
+traitdata <- data.frame(trait$Species) # new traitdata after fixing species names
+
+trait <- trait[,-1] # we dont need the columm Species anymore
+
+trait$Body_size <- log(trait$Body_size+1)
+trait$No_offspring_per_yr <- log(trait$No_offspring_per_yr+1)
+
+trait <- trait[,-10] # remove IUCN column
+trait[,1:2] <- scale(trait[,1:2])
+
+traitdis <- gowdis(data.frame(trait))
+traitpco <- ade4::dudi.pco(traitdis, scannf = F, nf = 5)
+
+cumsum(traitpco$eig / sum(traitpco$eig))[1:3] 
+
+traits <- data.frame(Axis1=traitpco$li[,1], 
+                     Axis2=traitpco$li[,2], 
+                     Axis3=traitpco$li[,3])
+rownames(traits) <- traitdata$trait.Species
+
+write.csv(data.frame(Species = traitdata$trait.Species, traits), 'traits_PCO.csv')
+
+```
+
+The original trait dataset comprises `r nrow(traitdata)` species.
+   
+3. Load phylogeny
+-------------------------------
+_Here we use an updated version of Pyron & Wiens' (2012) phylogeny._  
+_This phylogeny is not published yet, but Pyron's colaborators agreed in sharing this phylogeny with us. We must wait until this phylogeny gets publicated to publish your paper._
+```{r echo = F}
+tree <- read.tree('Pyron_tree_new.txt')
+tree
+
+origTreeN <- length(tree$tip.label)
+
+# get phy names
+phy_names <- tree$tip.label
+# which ones are not in IUCN data?
+spstolook <- which(!phy_names %in% IUCN$Species)
+# fix names 
+
+if(fix_ == "no"){  # fix...
+  
+  for(i in 1:length(spstolook)){ cat("\r", i, "from", length(spstolook))
+    
+    togo <- spstolook[i]
+    
+    resloop <- rl_synonyms(gsub('_',' ',phy_names[togo]), key = iucn_token)
+    if(length(resloop$result)>0){ # if found, save ...
+      phy_names[togo] <- resloop$result$accepted_name[1]
+    }
+    if(length(resloop$result)==0){ # if not found, search narrative and get ID
+      resloop <- rl_narrative(gsub('_',' ',phy_names[togo]), key = iucn_token)
+      
+      if(length(resloop$result)>0){ # if found, get name from ID
+        phy_names[togo] <- b.accepted.name2(as.character(resloop$result$species_id))
+      }
+    }
+  }
+  tipnames <- gsub(" ","_",phy_names)
+  # Check
+  # View(data.frame(Species=phy_names[spstolook]))
+  # save it!
+  write.csv(data.frame(Species=tipnames),'tree_names_fixed.csv')
+}
+
+if(fix_ == "yes"){  # Open if you have ran it before...
+  tipnames <- read.csv('tree_names_fixed.csv')
+}
+tipnames <- tipnames$Species
+
+
+# after fixing species names, some species appear as duplicated and their names are coerced to end with '.1'.
+# get rid of duplicates
+for(i in 1:length(tipnames)){ # Fix names
+  if(!is.na(tipnames[i])){
+    if(str_sub(tipnames[i], start= -1) == "_"){ # check is species names ends with '_'
+      tipnames[i] <- gsub('.{1}$', '', tipnames[i]) # remove '_' when species names ends with
+      }
+    if(str_sub(tipnames[i], start= -2) == ".1"){ # check is species names ends with '.1'
+      tipnames[i] <- gsub('.1', '', tipnames[i]) # remove '.1' when species names ends with
+    }
+  }
+  else{
+    tipnames[i] <- tipnames[i]
+  }
+}
+
+# renames tips
+tree$tip.label <- tipnames
+
+# remove duplicated species
+rem <- which(duplicated(tree$tip.label)) 
+tipnames <- data.frame(tipnames[-rem])
+tree <- drop.tip(tree, rem)
+
+```
+
+This phylogenetic comprises `r nrow(treedata)` species 
+
+4. Create a list of species belonging to the three datasets
+-------------------------------
+```{r echo = F}
+names(spp) <- names(tipnames) <- names(traitdata) <- "sps"
+
+lista1 <- data.frame(merge(spp, tipnames, by='sps'))
+
+lista2 <- merge(lista1, traitdata, by='sps') # This is the list of species belonging to all three datasets
+lista <- na.omit(as.vector(lista2[,1]))
+
+rm(lista1,lista2)
+```
+
+
+5. Subset occurrence, trait and phylogeny datasets to the species in common across all datasets
+-------------------------------
+```{r echo = F}
+## For distribution data
+
+occr <- occr[,which(names(occr) %in% lista)]
+Rich <- rowSums(occr) # Get richness for every cell
+
+# Are there communities without species?
+if(any(Rich==0)){
+  # Remove communities without species...
+  occr <- occr[-which(Rich==0),]
+  XY <- XY[-which(Rich==0),]
+}
+# Are there species occurring nowhere?
+if(any(apply(occr, 2, sum)==0)){
+  # Remove species occurring nowhere...
+  nosp <- which(apply(occr, 2, sum)==0)
+  occr <- occr[,-nosp]
+  lista <- lista[-nosp] # new lista
+}
+
+Rich <- rowSums(occr) # Get richness for every cell
+
+## For IUCN
+rownames(IUCN) <- IUCN$Species
+IUCN <- IUCN[lista,]
+
+## For trait data
+traits <- traits[lista,] 
+
+## For phylogeny
+
+phylo_nqro <- drop.tip(tree, lista) #Remove as espécies que quero e ficam as que não quero
+tip_nqro<-as.vector(phylo_nqro$tip.label) #Lista das sps que nao quero
+tree<-drop.tip(tree, tip_nqro) #Eliminar as sp que nao quero e ficam as que quero
+
+# Rearrange data
+# The species data in the data frames containing the distribution and trait measurements
+# must be in the same row order as the names of the species in the tree object (mytree$tip.label). 
+occr <- occr[,match(tree$tip.label,names(occr))]
+trait <- trait[match(tree$tip.label,rownames(trait)),]
+IUCN <- IUCN[match(tree$tip.label,rownames(IUCN)),]
+# check whether our community, tree and traits are in the same order.
+all.equal(names(occr), as.character(tree$tip.label))
+all.equal(names(occr), rownames(trait))
+all.equal(names(occr), rownames(IUCN))
+```
+
+# Plot species richness map
+```{r}
+SR <- cbind(data.frame(XY),Var=rowSums(occr))
+coordinates(SR)<-~x+y
+gridded(SR) <- TRUE
+SR <- raster(SR)
+{plot(SR,main='',axes=F,box=F, col=colorRampPalette(c('blue','yellow','red'))(40))
+plot(land, axes = F, add=T)}
+```
+
+There are `r dim(occr)[2]` species in common between these three datasets (~`r dim(occr)[2]/origSppN`% of all described amphibian species). We use this species' list to subset the original species, trait and phylogenetic datasets for use in downstream analyses.
+
+This dataset corresponds to `r dim(occr)[2]/origSppN`%, `r dim(occr)[2]/origTraitN`%, `r dim(occr)[2]/origTreeN`% of the original distribution, trait and phylogenetic dataset (mean = `r mean(c(dim(occr)[2]/origSppN, dim(occr)[2]/origTraitN, dim(occr)[2]/origTreeN))`, sd = `r sd(c(dim(occr)[2]/origSppN, dim(occr)[2]/origTraitN, dim(occr)[2]/origTreeN))`)
+   
+
+Get Realm data
+-------------------------------
+```{r echo = F}
+# REFERENCE PROJECTION MAP
+mapa <- raster(xmn = -20592508, xmx = 20588492, ymn = -5743602, ymx = 6573398,
+              crs = CRS("+proj=cea +datum=WGS84"))
+res(mapa) <- 111000
+
+Reanames <- readShapePoly("G:/GIS/CMEC regions & realms/newRealms.shp")
+crs(Reanames) <-"+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 "
+extent(mapa) <- extent(Reanames)
+Reanames<-data.frame(Reanames$Realm)
+names(Reanames)<-'Realm'
+Reanames<-cbind(Realms=rownames(Reanames),Reanames)
+#2) Extract values
+Realm <- readShapePoly("G:/GIS/CMEC regions & realms/newRealms.shp")
+crs(Realm) <-"+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 "
+realmnames<-sort(Realm$fullupgmar) # put alphabetic order because rasterize will put number in acordance with alphabetic order
+extent(mapa) <- extent(Realm)
+crs(mapa) <- crs(Realm)
+Realm <- rasterize(Realm,mapa,'fullupgmar')
+Realm <- projectRaster(Realm, crs="+proj=cea +datum=WGS84")
+Realm <- as.vector(raster::extract(Realm,XY,method='simple'))
+
+#Some cells comprise more than one Realm and the extract function give a medium value for that cell. 
+#This value have no meaning as we need the value of the Realm for each cell.
+check.integer <- function(N){ # function for check if number is integer
+!length(grep("[^[:digit:]]", as.character(N)))
+}
+
+for (i in seq_along(Realm)){ # put NA in non-integer numbers
+if (check.integer(Realm[i]))
+{Realm[i]<-Realm[i]
+}else{Realm[i]<-NA}
+}
+
+#Dont know why...but some codes come with whitespaces -To see usG: unique(Realm)
+trim <- function( x ) { #Function to remove whitespaces
+gsub("(^[[:spacG:]]+|[[:spacG:]]+$)", "", x)
+}
+Realm<-trim(Realm)
+
+#Give names for Realm code...
+Realm <- as.character(Reanames$Realm)[ match(Realm, c(1:11))]
+
+### Solve problem with NAs between realms
+Realm2 <- readShapePoly("G:/GIS/CMEC regions & realms/newRealms.shp")
+crs(Realm2) <-"+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 "
+Realm2 <- spTransform(Realm2, CRS("+proj=cea +datum=WGS84"))
+XY <- SpatialPoints(XY)
+crs(XY) <-"+proj=cea +datum=WGS84"
+Realm2<-sp::over(XY,Realm2)
+Realm2<-as.vector(Realm2$Realm)
+
+#Give names for NAs based on the previous 
+Realm3<-NA
+for(i in 1:length(Realm2)){
+if(is.na(Realm[i])){
+Realm3[i]<-Realm2[i]
+}else{
+Realm3[i]<-Realm[i]
+} 
+}
+
+Realm<-Realm3
+rm(Realm2,Realm3)
+
+# VISUALIZE
+d <- na.omit(data.frame(as.data.frame(XY),Realm))
+d$Realm <- as.numeric(d$Realm )
+d <- rasterFromXYZ(d)
+plot(d)  
+
+```
+
+# Save
+```{r eval = F, echo = F, warning = F}
+save.image("PD+FD_erosion_get_data_DD_new.RData")
+```
